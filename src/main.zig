@@ -2,26 +2,18 @@ const std = @import("std");
 const tokenizer = @import("tokenizer.zig");
 const Tokenizer = tokenizer.Tokenizer;
 
-const html =
-    \\ <!DOCTYPE html>
-    \\ <html>
-    \\     <head>
-    \\         <!-- A \0 sample comment -->
-    \\         <title>This is a foobar page</title>
-    \\     </head>
-    \\     <body>
-    \\         <p private=true>Foo<br />bar</p>
-    \\     </body>
-    \\ <html>
-;
+pub const log_level: std.log.Level = .debug;
 
 pub fn main() !void { 
     var alloc = std.heap.page_allocator;
-    var tok = try Tokenizer.initWithString(alloc, html);
+    var tok = try Tokenizer.initWithFile(alloc, "./test.html");
     while (!tok.eof()) {
-        std.debug.warn("{}\n", .{ tok.next() });
+        std.log.debug(.main, "{}\n", .{ tok.next() });
     }
+
+    std.log.debug(.main, "\n", .{});
+    
     for (tok.errors.items) |err| {
-        std.debug.warn("{}\n", .{ err });
+        std.log.debug(.main, "{}\n", .{ err });
     }
 }

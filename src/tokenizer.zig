@@ -34,6 +34,9 @@ pub const ParseError = struct {
         IncorrectlyOpenedComment,
         IncorrectlyClosedComment,
         InvalidCharacterSequenceAfterDoctypeName,
+        MissingWhitespaceAfterDoctypePublicKeyword,
+        MissingDoctypePublicIdentifier,
+        MissingQuoteBeforeDoctypePublicIdentifier,
     };
 };
 
@@ -53,29 +56,29 @@ pub const Token = struct {
     selfClosing: bool = false,
     attributes: ?ArrayList(Attribute) = null,
 
-    pub fn initStartTag(allocator: *mem.Allocator) Token {
+    pub fn initStartTagToken(allocator: *mem.Allocator) Token {
         return Token{
             .kind = .StartTag,
             .attributes = ArrayList(Attribute).init(allocator),
         };
     }
 
-    pub fn initEndTag(allocator: *mem.Allocator) Token {
+    pub fn initEndTagToken(allocator: *mem.Allocator) Token {
         return Token{
             .kind = .EndTag,
             .attributes = ArrayList(Attribute).init(allocator),
         };
     }
 
-    pub fn initCharacterTag(char: []const u8) Token {
+    pub fn initCharacterToken(char: []const u8) Token {
         return Token{
             .kind = .Character,
             .data = char
         };
     }
 
-    pub fn initNullCharacterTag() Token {
-        return initCharacterTag(&[_]u8{ 0x00 });
+    pub fn initNullCharacterToken() Token {
+        return initCharacterToken(&[_]u8{ 0x00 });
     }
 
     pub fn deinit(self: *Token) void {
@@ -236,32 +239,34 @@ pub const Tokenizer = struct {
     pub fn next(self: *Self) ?Token {
         var tokenData = ArrayList(u8).init(self.allocator);
         var temporaryBuffer = ArrayList(u8).init(self.allocator);
+        var publicIdentifier = ArrayList(u8).init(self.allocator);
         var commentData = ArrayList(u8).init(self.allocator);
         var currentAttributeName = ArrayList(u8).init(self.allocator);
         var currentAttributeValue = ArrayList(u8).init(self.allocator);
         var currentToken: ?Token = null;
 
         while (true) {
+            std.log.debug(.tokenizer, "{}\n", .{ self.state });
             switch (self.state) {
                 // 12.2.5.1 Data state
                 .Data => {
                     var next_char = self.nextChar();
                     switch (next_char) {
-                        '&' => {
-                            self.returnState = .Data;
-                            self.state = .CharacterReference;
-                        },
+                        // '&' => {
+                        //     self.returnState = .Data;
+                        //     self.state = .CharacterReference;
+                        // },
                         '<' => {
                             self.state = .TagOpen;
                         },
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
-                            return Token.initNullCharacterTag();
+                            return Token.initNullCharacterToken();
                         },
                         else => {
                             var buffer = self.allocator.alloc(u8, 1) catch unreachable;
                             buffer[0] = next_char;
-                            return Token.initCharacterTag(buffer);
+                            return Token.initCharacterToken(buffer);
                         }
                     }
                 },
@@ -269,21 +274,21 @@ pub const Tokenizer = struct {
                 .RCDATA => {
                     var next_char = self.nextChar();
                     switch (next_char) {
-                        '&' => {
-                            self.returnState = .RCDATA;
-                            self.state = .CharacterReference;
-                        },
+                        // '&' => {
+                        //     self.returnState = .RCDATA;
+                        //     self.state = .CharacterReference;
+                        // },
                         '<' => {
                             self.state = .RCDATALessThanSign;
                         },
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
-                            return Token.initCharacterTag("�");
+                            return Token.initCharacterToken("�");
                         },
                         else => {
                             var buffer = self.allocator.alloc(u8, 1) catch unreachable;
                             buffer[0] = next_char;
-                            return Token.initCharacterTag(buffer);
+                            return Token.initCharacterToken(buffer);
                         }
                     }
                 },
@@ -296,12 +301,12 @@ pub const Tokenizer = struct {
                         },
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
-                            return Token.initCharacterTag("�");
+                            return Token.initCharacterToken("�");
                         },
                         else => {
                             var buffer = self.allocator.alloc(u8, 1) catch unreachable;
                             buffer[0] = next_char;
-                            return Token.initCharacterTag(buffer);
+                            return Token.initCharacterToken(buffer);
                         }
                     }
                 },
@@ -314,12 +319,12 @@ pub const Tokenizer = struct {
                         },
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
-                            return Token.initCharacterTag("�");
+                            return Token.initCharacterToken("�");
                         },
                         else => {
                             var buffer = self.allocator.alloc(u8, 1) catch unreachable;
                             buffer[0] = next_char;
-                            return Token.initCharacterTag(buffer);
+                            return Token.initCharacterToken(buffer);
                         }
                     }
                 },
@@ -329,12 +334,12 @@ pub const Tokenizer = struct {
                     switch (next_char) {
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
-                            return Token.initCharacterTag("�");
+                            return Token.initCharacterToken("�");
                         },
                         else => {
                             var buffer = self.allocator.alloc(u8, 1) catch unreachable;
                             buffer[0] = next_char;
-                            return Token.initCharacterTag(buffer);
+                            return Token.initCharacterToken(buffer);
                         }
                     }
                 },
@@ -356,14 +361,14 @@ pub const Tokenizer = struct {
                         },
                         else => {
                             if (std.ascii.isAlpha(next_char)) {
-                                currentToken = Token.initStartTag(self.allocator);
+                                currentToken = Token.initStartTagToken(self.allocator);
                                 self.state = .TagName;
                                 self.reconsume = true;
                             } else {
                                 self.parseError(.InvalidFirstCharacterOfTagName);
                                 self.state = .Data;
                                 self.reconsume = true;
-                                return Token.initCharacterTag("<");
+                                return Token.initCharacterToken("<");
                             }
                         }
                     }
@@ -375,7 +380,7 @@ pub const Tokenizer = struct {
                         self.parseError(.MissingEndTagName);
                         self.state = .Data;
                     } else if (std.ascii.isAlpha(next_char)) {
-                        currentToken = Token.initEndTag(self.allocator);
+                        currentToken = Token.initEndTagToken(self.allocator);
                         self.state = .TagName;
                         self.reconsume = true;
                     } else {
@@ -403,7 +408,7 @@ pub const Tokenizer = struct {
                         },
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
-                            return Token.initCharacterTag("�");
+                            return Token.initCharacterToken("�");
                         },
                         else => {
                             var lowered = std.ascii.toLower(next_char);
@@ -420,16 +425,16 @@ pub const Tokenizer = struct {
                     } else {
                         self.reconsume = true;
                         self.state = .RCDATA;
-                        return Token.initCharacterTag("<");
+                        return Token.initCharacterToken("<");
                     }
                 },
                 // 12.2.5.10 RCDATA end tag open state
                 .RCDATAEndTagOpen => {
                     var next_char = self.nextChar();
                     if (std.ascii.isAlpha(next_char)) {
-                        currentToken = Token.initEndTag(self.allocator);
+                        currentToken = Token.initEndTagToken(self.allocator);
                     } else {
-                        return Token.initCharacterTag("</");
+                        return Token.initCharacterToken("</");
                     }
                     self.reconsume = true;
                     self.state = .RCDATA;
@@ -442,23 +447,65 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.12 RAWTEXT less-than sign state
                 .RAWTEXTLessThanSign => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (next_char == '/') {
+                        temporaryBuffer.shrink(0);
+                        self.state = .RAWTEXT;
+                    } else {
+                        self.reconsume = true;
+                        self.state = .RAWTEXT;
+                        return Token.initCharacterToken("<");
+                    }
                 },
                 // 12.2.5.13 RAWTEXT end tag open state
                 .RAWTEXTEndTagOpen => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (std.ascii.isAlpha(next_char)) {
+                        self.reconsume = true;
+                        self.state = .RAWTEXTEndTagName;
+                        return Token.initEndTagToken(self.allocator);
+                    } else {
+                        self.reconsume = true;
+                        self.state = .RAWTEXTEndTagName;
+                        return Token.initCharacterToken("</");
+                    }
                 },
                 // 12.2.5.14 RAWTEXT end tag name state
                 .RAWTEXTEndTagName => {
+                    // TODO: Reqiures more state information than we have available right now
                     unreachable;
                 },
                 // 12.2.5.15 Script data less-than sign state
                 .ScriptDataLessThanSign => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '/' => {
+                            temporaryBuffer.shrink(0);
+                            self.state = .ScriptDataEndTagOpen;
+                        },
+                        '!' => {
+                            self.state = .ScriptDataEscapeStart;
+                            return Token.initCharacterToken("<!");
+                        },
+                        else => {
+                            self.reconsume = true;
+                            self.state = .ScriptData;
+                            return Token.initCharacterToken("<");
+                        }
+                    }
                 },
                 // 12.2.5.16 Script data end tag open state
                 .ScriptDataEndTagOpen => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (std.ascii.isAlpha(next_char)) {
+                        currentToken = Token.initEndTagToken(self.allocator);
+                        self.reconsume = true;
+                        self.state = .ScriptDataEndTagName;
+                    } else {
+                        self.reconsume = true;
+                        self.state = .ScriptData;
+                        return Token.initCharacterToken("</");
+                    }
                 },
                 // 12.2.5.17 Script data end tag name state
                 .ScriptDataEndTagName => {
@@ -466,31 +513,123 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.18 Script data escape start state
                 .ScriptDataEscapeStart => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (next_char == '-') {
+                        self.state = .ScriptDataEscapeStart;
+                        return Token.initCharacterToken("-");
+                    } else {
+                        self.reconsume = true;
+                        self.state = .ScriptData;
+                    }
                 },
                 // 12.2.5.19 Script data escape start dash state
                 .ScriptDataEscapeStartDash => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (next_char == '-') {
+                        self.state = .ScriptDataEscapedDashDash;
+                        return Token.initCharacterToken("-");
+                    } else {
+                        self.reconsume = true;
+                        self.state = .ScriptData;
+                    }
                 },
                 // 12.2.5.20 Script data escaped state
                 .ScriptDataEscaped => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '-' => {
+                            self.state = .ScriptDataEscapedDash;
+                            return Token.initCharacterToken("-");
+                        },
+                        '<' => {
+                            self.state = .ScriptDataEscapedLessThanSign;
+                        },
+                        0x00 => {
+                            self.parseError(.UnexpectedNullCharacter);
+                            return Token.initCharacterToken("�");
+                        },
+                        else => {
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        }
+                    }
                 },
                 // 12.2.5.21 Script data escaped dash state
                 .ScriptDataEscapedDash => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '-' => {
+                            self.state = .ScriptDataEscapedDashDash;
+                            return Token.initCharacterToken("-");
+                        },
+                        '<' => {
+                            self.state = .ScriptDataEscapedLessThanSign;
+                        },
+                        0x00 => {
+                            self.parseError(.UnexpectedNullCharacter);
+                            return Token.initCharacterToken("�");
+                        },
+                        else => {
+                            self.state = .ScriptDataEscaped;
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        }
+                    }
                 },
                 // 12.2.5.22 Script data escaped dash dash state
                 .ScriptDataEscapedDashDash => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '-' => {
+                            return Token.initCharacterToken("-");
+                        },
+                        '<' => {
+                            self.state = .ScriptDataEscapedLessThanSign;
+                        },
+                        0x00 => {
+                            self.parseError(.UnexpectedNullCharacter);
+                            self.state = .ScriptDataEscaped;
+                            return Token.initCharacterToken("�");
+                        },
+                        else => {
+                            self.state = .ScriptDataEscaped;
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        }
+                    }
                 },
                 // 12.2.5.23 Script data escaped less-than sign state
                 .ScriptDataEscapedLessThanSign => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (next_char == '/') {
+                        temporaryBuffer.shrink(0);
+                        self.state = .ScriptDataEscapedEndTagOpen;
+                    } else if (std.ascii.isAlpha(next_char)) {
+                        temporaryBuffer.shrink(0);
+                        self.reconsume = true;
+                        self.state = .ScriptDataDoubleEscapeStart;
+                        return Token.initCharacterToken("<");
+                    } else {
+                        self.reconsume = true;
+                        self.state = .ScriptDataEscaped;
+                        return Token.initCharacterToken("<");
+                    }
                 },
                 // 12.2.5.24 Script data escaped end tag open state
                 .ScriptDataEscapedEndTagOpen => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (std.ascii.isAlpha(next_char)) {
+                        currentToken = Token.initEndTagToken(self.allocator);
+                        self.reconsume = true;
+                        self.state = .ScriptDataEscapedEndTagName;
+                    } else {
+                        self.reconsume = true;
+                        self.state = .ScriptDataEscaped;
+                        return Token.initCharacterToken("</");
+                    }
                 },
                 // 12.2.5.25 Script data escaped end tag name state
                 .ScriptDataEscapedEndTagName => {
@@ -498,27 +637,147 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.26 Script data double escape start state
                 .ScriptDataDoubleEscapeStart => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '\t', 0x0A, 0x0C, ' ', '/', '>' => {
+                            if (mem.eql(u8, temporaryBuffer.items, "script")) {
+                                self.state = .ScriptDataDoubleEscaped;
+                            } else {
+                                self.state = .ScriptDataEscaped;
+                            }
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        },
+                        else => {
+                            if (std.ascii.isAlpha(next_char)) {
+                                var lowered = std.ascii.toLower(next_char);
+                                temporaryBuffer.append(lowered) catch unreachable;
+                                var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                                buffer[0] = lowered;
+                                return Token.initCharacterToken(buffer);
+                            } else {
+                                self.reconsume = true;
+                                self.state = .ScriptDataEscaped;
+                            }
+                        }
+                    }
                 },
                 // 12.2.5.27 Script data double escaped state
                 .ScriptDataDoubleEscaped => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '-' => {
+                            self.state = .ScriptDataDoubleEscapedDash;
+                            return Token.initCharacterToken("-");
+                        },
+                        '<' => {
+                            self.state = .ScriptDataDoubleEscapedLessThanSign;
+                            return Token.initCharacterToken("<");
+                        },
+                        0x00 => {
+                            self.parseError(.UnexpectedNullCharacter);
+                            return Token.initCharacterToken("�");
+                        },
+                        else => {
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        }
+                    }
                 },
                 // 12.2.5.28 Script data double escaped dash state
                 .ScriptDataDoubleEscapedDash => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '-' => {
+                            self.state = .ScriptDataDoubleEscapedDashDash;
+                            return Token.initCharacterToken("-");
+                        },
+                        '<' => {
+                            self.state = .ScriptDataDoubleEscapedLessThanSign;
+                            return Token.initCharacterToken("<");
+                        },
+                        0x00 => {
+                            self.parseError(.UnexpectedNullCharacter);
+                            self.state = .ScriptDataDoubleEscaped;
+                            return Token.initCharacterToken("�");
+                        },
+                        else => {
+                            self.state = .ScriptDataDoubleEscaped;
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        }
+                    }
                 },
                 // 12.2.5.29 Script data double escaped dash dash state
                 .ScriptDataDoubleEscapedDashDash => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '-' => {
+                            return Token.initCharacterToken("-");
+                        },
+                        '<' => {
+                            self.state = .ScriptDataDoubleEscapedLessThanSign;
+                            return Token.initCharacterToken("<");
+                        },
+                        '>' => {
+                            self.state = .ScriptData;
+                            return Token.initCharacterToken(">");
+                        },
+                        0x00 => {
+                            self.parseError(.UnexpectedNullCharacter);
+                            self.state = .ScriptDataDoubleEscaped;
+                            return Token.initCharacterToken("�");
+                        },
+                        else => {
+                            self.state = .ScriptDataDoubleEscaped;
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        }
+                    }
                 },
                 // 12.2.5.30 Script data double escaped less-than sign state
                 .ScriptDataDoubleEscapedLessThanSign => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    if (next_char == '/') {
+                        temporaryBuffer.shrink(0);
+                        self.state = .ScriptDataDoubleEscapeEnd;
+                        return Token.initCharacterToken("/");
+                    } else {
+                        self.reconsume = true;
+                        self.state = .ScriptDataDoubleEscaped;
+                    }
                 },
                 // 12.2.5.31 Script data double escape end state
                 .ScriptDataDoubleEscapeEnd => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '\t', 0x0A, 0x0C, ' ', '/', '>' => {
+                            if (mem.eql(u8, temporaryBuffer.items, "script")) {
+                                self.state = .ScriptDataEscaped;
+                            } else {
+                                self.state = .ScriptDataDoubleEscaped;
+                            }
+                            var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                            buffer[0] = next_char;
+                            return Token.initCharacterToken(buffer);
+                        },
+                        else => {
+                            if (std.ascii.isAlpha(next_char)) {
+                                var lowered = std.ascii.toLower(next_char);
+                                temporaryBuffer.append(lowered) catch unreachable;
+                                var buffer = self.allocator.alloc(u8, 1) catch unreachable;
+                                buffer[0] = lowered;
+                                return Token.initCharacterToken(buffer);
+                            } else {
+                                self.reconsume = true;
+                                self.state = .ScriptDataDoubleEscaped;
+                            }
+                        }
+                    }
                 },
                 // 12.2.5.32 Before attribute name state
                 .BeforeAttributeName => {
@@ -634,10 +893,10 @@ pub const Tokenizer = struct {
                         '"' => {
                             self.state = .AfterAttributeValueQuoted;
                         },
-                        '&' => {
-                            self.returnState = .AttributeValueDoubleQuoted;
-                            self.state = .CharacterReference;
-                        },
+                        // '&' => {
+                        //     self.returnState = .AttributeValueDoubleQuoted;
+                        //     self.state = .CharacterReference;
+                        // },
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
                             currentAttributeValue.appendSlice("�") catch unreachable;
@@ -654,10 +913,10 @@ pub const Tokenizer = struct {
                         '\'' => {
                             self.state = .AfterAttributeValueQuoted;
                         },
-                        '&' => {
-                            self.returnState = .AttributeValueSingleQuoted;
-                            self.state = .CharacterReference;
-                        },
+                        // '&' => {
+                        //     self.returnState = .AttributeValueSingleQuoted;
+                        //     self.state = .CharacterReference;
+                        // },
                         0x00 => {
                             self.parseError(.UnexpectedNullCharacter);
                             currentAttributeValue.appendSlice("�") catch unreachable;
@@ -674,10 +933,10 @@ pub const Tokenizer = struct {
                         '\t', 0x0A, 0x0C, ' ' => {
                             self.state = .BeforeAttributeName;
                         },
-                        '&' => {
-                            self.returnState = .AttributeValueUnquoted;
-                            self.state = .CharacterReference;
-                        },
+                        // '&' => {
+                        //     self.returnState = .AttributeValueUnquoted;
+                        //     self.state = .CharacterReference;
+                        // },
                         '>' => {
                             currentToken.?.name = tokenData.toOwnedSlice();
                             self.state = .Data;
@@ -1035,7 +1294,34 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.57 After DOCTYPE public keyword state
                 .AfterDOCTYPEPublicKeyword => {
-                    unreachable;
+                    var next_char = self.nextChar();
+                    switch (next_char) {
+                        '\t', 0x0A, 0x0C, ' ' => {
+                            self.state = .BeforeDOCTYPEPublicIdentifier;
+                        },
+                        '"' => {
+                            self.parseError(.MissingWhitespaceAfterDoctypePublicKeyword);
+                            publicIdentifier.shrink(0);
+                            self.state = .DOCTYPEPublicIdentifierDoubleQuoted;
+                        },
+                        '\'' => {
+                            self.parseError(.MissingWhitespaceAfterDoctypePublicKeyword);
+                            publicIdentifier.shrink(0);
+                            self.state = .DOCTYPEPublicIdentifierSingleQuoted;
+                        },
+                        '>' => {
+                            self.parseError(.MissingDoctypePublicIdentifier);
+                            currentToken.?.forceQuirks = true;
+                            self.state = .Data;
+                            return currentToken;
+                        },
+                        else => {
+                            self.parseError(.MissingQuoteBeforeDoctypePublicIdentifier);
+                            currentToken.?.forceQuirks = true;
+                            self.reconsume = true;
+                            self.state = .BogusDOCTYPE;
+                        }
+                    }
                 },
                 // 12.2.5.58 Before DOCTYPE public identifier state
                 .BeforeDOCTYPEPublicIdentifier => {
@@ -1095,10 +1381,30 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.72 Character reference state
                 .CharacterReference => {
-                    unreachable;
+                    temporaryBuffer.shrink(0);
+                    temporaryBuffer.append('&') catch unreachable;
+                    var next_char = self.nextChar();
+                    if (std.ascii.isAlNum(next_char)) {
+                        self.reconsume = true;
+                        self.state = .NamedCharacterReference;
+                    } else if (next_char == '#') {
+                        temporaryBuffer.append(next_char) catch unreachable;
+                        self.state = .NamedCharacterReference;
+                    } else {
+                        switch (self.returnState.?) {
+                            .AttributeValueDoubleQuoted, .AttributeValueSingleQuoted, .AttributeValueUnquoted => {
+                                currentAttributeValue.appendSlice(temporaryBuffer.toOwnedSlice()) catch unreachable;
+                            },
+                            else => {
+                                return Token.initCharacterToken(temporaryBuffer.toOwnedSlice());
+                            }
+                        }
+                    }
                 },
                 // 12.2.5.73 Named character reference state
                 .NamedCharacterReference => {
+                    // TODO: I need a state machine generator of some kind.
+                    // https://github.com/adrian-thurston/ragel/issues/6
                     unreachable;
                 },
                 // 12.2.5.74 Ambiguous ampersand state
