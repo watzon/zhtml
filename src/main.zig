@@ -6,7 +6,7 @@ const html =
     \\ <!DOCTYPE html>
     \\ <html>
     \\     <head>
-    \\         <!-- A sample comment -->
+    \\         <!-- A \0 sample comment -->
     \\         <title>This is a foobar page</title>
     \\     </head>
     \\     <body>
@@ -18,8 +18,10 @@ const html =
 pub fn main() !void { 
     var alloc = std.heap.page_allocator;
     var tok = try Tokenizer.initWithString(alloc, html);
-    tok.tokenize();
-    for (tok.tokens.items) |token| {
-        std.debug.warn("{}\n", .{ token });
+    while (!tok.eof()) {
+        std.debug.warn("{}\n", .{ tok.next() });
+    }
+    for (tok.errors.items) |err| {
+        std.debug.warn("{}\n", .{ err });
     }
 }
