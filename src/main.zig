@@ -1,19 +1,20 @@
 const std = @import("std");
-const tokenizer = @import("tokenizer.zig");
-const Tokenizer = tokenizer.Tokenizer;
+const Tokenizer = @import("tokenizer.zig").Tokenizer;
 
 pub const log_level: std.log.Level = .debug;
 
 pub fn main() !void { 
     var alloc = std.heap.page_allocator;
-    var tok = try Tokenizer.initWithFile(alloc, "./test.html");
-    while (!tok.eof()) {
-        std.log.debug(.main, "{}\n", .{ tok.next() });
-    }
+    var tokenizer = try Tokenizer.initWithFile(alloc, "./test.html");
+    while (true) {
+        var token = tokenizer.next() catch |err| {
+            std.log.err(.main, "{} at {}/{}\n", .{ err, tokenizer.line, tokenizer.column });
+            continue;
+        };
 
-    std.log.debug(.main, "\n", .{});
-    
-    for (tok.errors.items) |err| {
-        std.log.debug(.main, "{}\n", .{ err });
+        if (token) |tok| {
+            std.log.info(.main, "{}\n", .{ tok });
+            if (tok == .EndOfFile) break;
+        }
     }
 }
