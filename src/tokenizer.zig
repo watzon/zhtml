@@ -4,11 +4,17 @@ const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 
 fn isQuote(c: u8) bool {
-    return c == '"' or c == '\'';
+    return switch (c) {
+        '"', '\'' => true,
+        else => false
+    };
 }
 
 fn isWhitespace(c: u8) bool {
-    return c == '\n' or c == '\t' or c == ' ' or c == '\r';
+    return switch (c) {
+        '\n', '\t', ' ', '\r' => true,
+        else => false
+    };
 }
 
 pub const ParseError = error {
