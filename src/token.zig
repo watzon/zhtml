@@ -21,7 +21,7 @@ pub const Token = union(enum) {
             if (value.attributes.items.len > 0) {
                 try writer.writeAll(", attributes = .{ ");
                 for (value.attributes.items) |attr, i| {
-                    try writer.print("{}: {}", .{ attr.name, attr.value });
+                    try writer.print("{}: \"{}\"", .{ attr.name, attr.value });
                     if (i + 1 < value.attributes.items.len)
                         try writer.writeAll(", ");
                 }

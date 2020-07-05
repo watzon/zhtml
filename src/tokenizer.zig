@@ -9,6 +9,8 @@ const ParseError = @import("parse_error.zig").ParseError;
 /// Represents the state of the HTML tokenizer as described
 /// [here](https://html.spec.whatwg.org/multipage/parsing.html#tokenization)
 pub const Tokenizer = struct {
+    const Self = @This();
+
     /// The current state of the parser.
     pub const State = enum {
         Data,
@@ -92,8 +94,6 @@ pub const Tokenizer = struct {
         DecimalCharacterReference,
         NumericCharacterReferenceEnd,
     };
-
-    const Self = @This();
     
     allocator: *mem.Allocator,
     state: State = .Data,
@@ -760,21 +760,7 @@ pub const Tokenizer = struct {
                         self.state = .BeforeAttributeValue;
                     },
                     '>' => {
-                        const attr = Token.Attribute{
-                            .name = self.currentAttributeName.toOwnedSlice(),
-                            .value = self.currentAttributeValue.toOwnedSlice(),
-                        };
-                        switch (self.currentToken.?) {
-                            .StartTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            .EndTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            else => {}
-                        }
+                        self.addAttributeToCurrentToken();
                         self.state = .Data;
                         self.emitToken(self.currentToken.?);
                         self.currentToken = null;
@@ -801,21 +787,7 @@ pub const Tokenizer = struct {
                         self.state = .AttributeValueSingleQuoted;
                     },
                     '>' => {
-                        const attr = Token.Attribute{
-                            .name = self.currentAttributeName.toOwnedSlice(),
-                            .value = self.currentAttributeValue.toOwnedSlice(),
-                        };
-                        switch (self.currentToken.?) {
-                            .StartTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            .EndTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            else => {}
-                        }
+                        self.addAttributeToCurrentToken();
                         self.state = .Data;
                         self.emitToken(self.currentToken.?);
                         self.currentToken = null;
@@ -879,21 +851,7 @@ pub const Tokenizer = struct {
                         self.state = .CharacterReference;
                     },
                     '>' => {
-                        const attr = Token.Attribute{
-                            .name = self.currentAttributeName.toOwnedSlice(),
-                            .value = self.currentAttributeValue.toOwnedSlice(),
-                        };
-                        switch (self.currentToken.?) {
-                            .StartTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            .EndTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            else => {}
-                        }
+                        self.addAttributeToCurrentToken();
                         self.state = .Data;
                         self.emitToken(self.currentToken.?);
                         self.currentToken = null;
@@ -910,6 +868,7 @@ pub const Tokenizer = struct {
             // 12.2.5.39 After attribute value (quoted) state
             .AfterAttributeValueQuoted => {
                 var next_char = self.nextChar();
+                self.addAttributeToCurrentToken();
                 switch (next_char) {
                     '\t', 0x0A, 0x0C, ' ' => {
                         self.state = .BeforeAttributeName;
@@ -918,21 +877,6 @@ pub const Tokenizer = struct {
                         self.state = .SelfClosingStartTag;
                     },
                     '>' => {
-                        const attr = Token.Attribute{
-                            .name = self.currentAttributeName.toOwnedSlice(),
-                            .value = self.currentAttributeValue.toOwnedSlice(),
-                        };
-                        switch (self.currentToken.?) {
-                            .StartTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            .EndTag => |*tag| {
-                                tag.attributes.append(attr) catch unreachable;
-                                tag.name = self.tokenData.toOwnedSlice();
-                            },
-                            else => {}
-                        }
                         self.state = .Data;
                         self.emitToken(self.currentToken.?);
                         self.currentToken = null;
@@ -946,6 +890,7 @@ pub const Tokenizer = struct {
             // 12.2.5.40 Self-closing start tag state
             .SelfClosingStartTag => {
                 var next_char = self.nextChar();
+                self.addAttributeToCurrentToken();
                 switch (next_char) {
                     '>' => {
                         switch (self.currentToken.?) {
@@ -1870,6 +1815,25 @@ pub const Tokenizer = struct {
 
     pub fn emitToken(self: *Self, token: Token) void {
         self.backlog.append(token) catch unreachable;
+    }
+
+    fn addAttributeToCurrentToken(self: *Self) void {
+        if (self.currentAttributeName.items.len < 1) return;
+        const attr = Token.Attribute{
+            .name = self.currentAttributeName.toOwnedSlice(),
+            .value = self.currentAttributeValue.toOwnedSlice(),
+        };
+        switch (self.currentToken.?) {
+            .StartTag => |*tag| {
+                tag.attributes.append(attr) catch unreachable;
+                tag.name = self.tokenData.toOwnedSlice();
+            },
+            .EndTag => |*tag| {
+                tag.attributes.append(attr) catch unreachable;
+                tag.name = self.tokenData.toOwnedSlice();
+            },
+            else => {}
+        }
     }
 
     fn nextChar(self: *Self) u8 {
