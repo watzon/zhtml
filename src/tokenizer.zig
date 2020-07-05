@@ -32,6 +32,22 @@ pub const ParseError = error {
     MissingWhitespaceAfterDoctypePublicKeyword,
     MissingDoctypePublicIdentifier,
     MissingQuoteBeforeDoctypePublicIdentifier,
+    MissingQuoteBeforeDoctypeSystemIdentifier,
+    AbruptDoctypePublicIdentifier,
+    MissingWhitespaceBetweenDoctypePublicAndSystemIdentifiers,
+    MissingWhitespaceAfterDoctypeSystemKeyword,
+    MissingDoctypeSystemIdentifier,
+    UnexpectedCharacterAfterDoctypeSystemIdentifier,
+    AbruptDoctypeSystemIdentifier,
+    CdataInHtml,
+    UnknownNamedCharacterReference,
+    AbsenceOfDigitsInNumericCharacterReference,
+    MissingSemicolonAfterCharacterReference,
+    NullCharacterReference,
+    CharacterReferenceOutsideUnicodeRange,
+    SurrogateCharacterReference,
+    NoncharacterCharacterReference,
+    ControlCharacterReference
 };
 
 pub const Attribute = struct {
@@ -51,17 +67,48 @@ pub const Token = union(enum) {
         name: ?[]const u8 = null,
         selfClosing: bool = false,
         attributes: ArrayList(Attribute),
+
+        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
+            try writer.writeAll("{ ");
+            try writer.print(".name = {}, .selfClosing = {}", .{ value.name, value.selfClosing });
+            if (value.attributes.items.len > 0) {
+                try writer.writeAll(", attributes = .{ ");
+                for (value.attributes.items) |attr, i| {
+                    try writer.print("{}: {}", .{ attr.name, attr.value });
+                    if (i + 1 < value.attributes.items.len)
+                        try writer.writeAll(", ");
+                }
+                try writer.writeAll(" }");
+            }
+            try writer.writeAll(" }");
+        }
     },
     EndTag: struct {
         name: ?[]const u8 = null,
         selfClosing: bool = false,
         attributes: ArrayList(Attribute),
+
+        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
+            try writer.writeAll("{ ");
+            try writer.print(".name = {}, .selfClosing = {}", .{ value.name, value.selfClosing });
+            try writer.writeAll(" }");
+        }
     },
     Comment: struct {
         data: ?[]const u8 = null,
     },
     Character: struct {
-        data: u23,
+        data: u21,
+
+        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
+            var char: [4]u8 = undefined;
+            var len = std.unicode.utf8Encode(value.data, char[0..]) catch unreachable;
+            if (char[0] == '\n') {
+                len = 2;
+                std.mem.copy(u8, char[0..2], "\\n");
+            }
+            try writer.print("\"{}\"", .{ char[0..len] });
+        }
     },
     EndOfFile,
 };
@@ -171,10 +218,12 @@ pub const Tokenizer = struct {
     tokenData: ArrayList(u8),
     temporaryBuffer: ArrayList(u8),
     publicIdentifier: ArrayList(u8),
+    systemIdentifier: ArrayList(u8),
     commentData: ArrayList(u8),
     currentAttributeName: ArrayList(u8),
     currentAttributeValue: ArrayList(u8),
     currentToken: ?Token = null,
+    characterReferenceCode: usize = 0,
 
     /// Create a new {{Tokenizer}} instance using a file.
     pub fn initWithFile(allocator: *mem.Allocator, filename: []const u8) !Tokenizer {
@@ -186,6 +235,7 @@ pub const Tokenizer = struct {
         tokenizer.tokenData = ArrayList(u8).init(allocator);
         tokenizer.temporaryBuffer = ArrayList(u8).init(allocator);
         tokenizer.publicIdentifier = ArrayList(u8).init(allocator);
+        tokenizer.systemIdentifier = ArrayList(u8).init(allocator);
         tokenizer.commentData = ArrayList(u8).init(allocator);
         tokenizer.currentAttributeName = ArrayList(u8).init(allocator);
         tokenizer.currentAttributeValue = ArrayList(u8).init(allocator);
@@ -201,6 +251,7 @@ pub const Tokenizer = struct {
             .tokenData = ArrayList(u8).init(allocator),
             .temporaryBuffer = ArrayList(u8).init(allocator),
             .publicIdentifier = ArrayList(u8).init(allocator),
+            .systemIdentifier = ArrayList(u8).init(allocator),
             .commentData = ArrayList(u8).init(allocator),
             .currentAttributeName = ArrayList(u8).init(allocator),
             .currentAttributeValue = ArrayList(u8).init(allocator),
@@ -244,10 +295,10 @@ pub const Tokenizer = struct {
             .Data => {
                 var next_char = self.nextChar();
                 switch (next_char) {
-                    // '&' => {
-                    //     self.returnState = .Data;
-                    //     self.state = .CharacterReference;
-                    // },
+                    '&' => {
+                        self.returnState = .Data;
+                        self.state = .CharacterReference;
+                    },
                     '<' => {
                         self.state = .TagOpen;
                     },
@@ -264,10 +315,10 @@ pub const Tokenizer = struct {
             .RCDATA => {
                 var next_char = self.nextChar();
                 switch (next_char) {
-                    // '&' => {
-                    //     self.returnState = .RCDATA;
-                    //     self.state = .CharacterReference;
-                    // },
+                    '&' => {
+                        self.returnState = .RCDATA;
+                        self.state = .CharacterReference;
+                    },
                     '<' => {
                         self.state = .RCDATALessThanSign;
                     },
@@ -763,7 +814,7 @@ pub const Tokenizer = struct {
                         self.reconsume = true;
                     },
                     '=' => {
-                        self.currentAttributeName.shrink(1);
+                        self.currentAttributeName.shrink(0);
                         self.currentAttributeName.append(self.currentChar()) catch unreachable;
                         self.currentAttributeValue.shrink(0);
                         self.state = .AttributeName;
@@ -857,9 +908,19 @@ pub const Tokenizer = struct {
                         self.state = .AttributeValueSingleQuoted;
                     },
                     '>' => {
+                        const attr = Attribute{
+                            .name = self.currentAttributeName.toOwnedSlice(),
+                            .value = self.currentAttributeValue.toOwnedSlice(),
+                        };
                         switch (self.currentToken.?) {
-                            .StartTag => |*tag| tag.name = self.tokenData.toOwnedSlice(),
-                            .EndTag => |*tag| tag.name = self.tokenData.toOwnedSlice(),
+                            .StartTag => |*tag| {
+                                tag.attributes.append(attr) catch unreachable;
+                                tag.name = self.tokenData.toOwnedSlice();
+                            },
+                            .EndTag => |*tag| {
+                                tag.attributes.append(attr) catch unreachable;
+                                tag.name = self.tokenData.toOwnedSlice();
+                            },
                             else => {}
                         }
                         self.state = .Data;
@@ -880,10 +941,10 @@ pub const Tokenizer = struct {
                     '"' => {
                         self.state = .AfterAttributeValueQuoted;
                     },
-                    // '&' => {
-                    //     self.returnState = .AttributeValueDoubleQuoted;
-                    //     self.state = .CharacterReference;
-                    // },
+                    '&' => {
+                        self.returnState = .AttributeValueDoubleQuoted;
+                        self.state = .CharacterReference;
+                    },
                     0x00 => {
                         self.currentAttributeValue.appendSlice("�") catch unreachable;
                         return ParseError.UnexpectedNullCharacter;
@@ -900,10 +961,10 @@ pub const Tokenizer = struct {
                     '\'' => {
                         self.state = .AfterAttributeValueQuoted;
                     },
-                    // '&' => {
-                    //     self.returnState = .AttributeValueSingleQuoted;
-                    //     self.state = .CharacterReference;
-                    // },
+                    '&' => {
+                        self.returnState = .AttributeValueSingleQuoted;
+                        self.state = .CharacterReference;
+                    },
                     0x00 => {
                         self.currentAttributeValue.appendSlice("�") catch unreachable;
                         return ParseError.UnexpectedNullCharacter;
@@ -920,14 +981,24 @@ pub const Tokenizer = struct {
                     '\t', 0x0A, 0x0C, ' ' => {
                         self.state = .BeforeAttributeName;
                     },
-                    // '&' => {
-                    //     self.returnState = .AttributeValueUnquoted;
-                    //     self.state = .CharacterReference;
-                    // },
+                    '&' => {
+                        self.returnState = .AttributeValueUnquoted;
+                        self.state = .CharacterReference;
+                    },
                     '>' => {
+                        const attr = Attribute{
+                            .name = self.currentAttributeName.toOwnedSlice(),
+                            .value = self.currentAttributeValue.toOwnedSlice(),
+                        };
                         switch (self.currentToken.?) {
-                            .StartTag => |*tag| tag.name = self.tokenData.toOwnedSlice(),
-                            .EndTag => |*tag| tag.name = self.tokenData.toOwnedSlice(),
+                            .StartTag => |*tag| {
+                                tag.attributes.append(attr) catch unreachable;
+                                tag.name = self.tokenData.toOwnedSlice();
+                            },
+                            .EndTag => |*tag| {
+                                tag.attributes.append(attr) catch unreachable;
+                                tag.name = self.tokenData.toOwnedSlice();
+                            },
                             else => {}
                         }
                         self.state = .Data;
@@ -954,9 +1025,19 @@ pub const Tokenizer = struct {
                         self.state = .SelfClosingStartTag;
                     },
                     '>' => {
+                        const attr = Attribute{
+                            .name = self.currentAttributeName.toOwnedSlice(),
+                            .value = self.currentAttributeValue.toOwnedSlice(),
+                        };
                         switch (self.currentToken.?) {
-                            .StartTag => |*tag| tag.name = self.tokenData.toOwnedSlice(),
-                            .EndTag => |*tag| tag.name = self.tokenData.toOwnedSlice(),
+                            .StartTag => |*tag| {
+                                tag.attributes.append(attr) catch unreachable;
+                                tag.name = self.tokenData.toOwnedSlice();
+                            },
+                            .EndTag => |*tag| {
+                                tag.attributes.append(attr) catch unreachable;
+                                tag.name = self.tokenData.toOwnedSlice();
+                            },
                             else => {}
                         }
                         self.state = .Data;
@@ -1002,6 +1083,7 @@ pub const Tokenizer = struct {
                 switch (next_char) {
                     '>' => {
                         self.state = .Data;
+                        self.backlog.append(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } }) catch unreachable;
                     },
                     0x00 => {
                         self.commentData.appendSlice("�") catch unreachable;
@@ -1015,17 +1097,21 @@ pub const Tokenizer = struct {
             // 12.2.5.42 Markup declaration open state
             .MarkupDeclarationOpen => {
                 var next_seven = self.peekN(7);
-                next_seven = std.ascii.allocLowerString(self.allocator, next_seven) catch unreachable;
+                var lowered = std.ascii.allocLowerString(self.allocator, next_seven) catch unreachable;
 
                 if (mem.eql(u8, next_seven[0..2], "--")) {
                     self.index += 2;
                     self.state = .CommentStart;
-                } else if (mem.eql(u8, next_seven, "doctype")) {
+                } else if (mem.eql(u8, lowered, "doctype")) {
                     self.index += 7;
                     self.state = .DOCTYPE;
-                } else if (mem.eql(u8, next_seven, "[cdata[")) {
-                    // TODO
-                    unreachable;
+                } else if (mem.eql(u8, next_seven, "[CDATA[")) {
+                    // FIXME: Consume those characters. If there is an adjusted current node and it is not
+                    // an element in the HTML namespace, then switch to the CDATA section state.
+                    self.index += 7;
+                    self.backlog.append(Token { .Comment = .{ .data = "[CDATA[" } }) catch unreachable;
+                    self.state = .BogusComment;
+                    return ParseError.CdataInHtml;
                 } else {
                     self.state = .BogusComment;
                 }
@@ -1272,12 +1358,13 @@ pub const Tokenizer = struct {
             },
             // 12.2.5.56 After DOCTYPE name state
             .AfterDOCTYPEName => {
-                var next_char = self.nextChar();
+                var next_char = self.peekChar();
                 switch (next_char) {
                     '\t', 0x0A, 0x0C, ' ' => {
-                        // Ignore and do nothing.
+                        self.index += 1;
                     },
                     '>' => {
+                        self.index += 1;
                         self.state = .Data;
                         self.backlog.append(self.currentToken.?) catch unreachable;
                         self.currentToken = null;
@@ -1293,7 +1380,9 @@ pub const Tokenizer = struct {
                             self.state = .AfterDOCTYPESystemKeyword;
                         } else {
                             self.currentToken.?.DOCTYPE.forceQuirks = true;
-                            self.reconsume = true;
+                            self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                            self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                            self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                             self.state = .BogusDOCTYPE;
                             return ParseError.InvalidCharacterSequenceAfterDoctypeName;
                         }
@@ -1319,6 +1408,9 @@ pub const Tokenizer = struct {
                     },
                     '>' => {
                         self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.state = .Data;
                         self.backlog.append(self.currentToken.?) catch unreachable;
                         self.currentToken = null;
@@ -1326,6 +1418,9 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.reconsume = true;
                         self.state = .BogusDOCTYPE;
                         return ParseError.MissingQuoteBeforeDoctypePublicIdentifier;
@@ -1334,97 +1429,541 @@ pub const Tokenizer = struct {
             },
             // 12.2.5.58 Before DOCTYPE public identifier state
             .BeforeDOCTYPEPublicIdentifier => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\t', 0x0A, 0x0C, ' ' => {
+                        // Ignore and do nothing
+                    },
+                    '"' => {
+                        self.publicIdentifier.shrink(0);
+                        self.state = .DOCTYPEPublicIdentifierDoubleQuoted;
+                    },
+                    '\'' => {
+                        self.publicIdentifier.shrink(0);
+                        self.state = .DOCTYPEPublicIdentifierSingleQuoted;
+                    },
+                    '>' => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                    },
+                    else => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.reconsume = true;
+                        self.state = .BogusDOCTYPE;
+                        return ParseError.MissingQuoteBeforeDoctypePublicIdentifier;
+                    }
+                }
             },
             // 12.2.5.59 DOCTYPE public identifier (double-quoted) state
             .DOCTYPEPublicIdentifierDoubleQuoted => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '"' => {
+                        self.state = .AfterDOCTYPEPublicIdentifier;
+                    },
+                    0x00 => {
+                        self.publicIdentifier.appendSlice("�") catch unreachable;
+                        return ParseError.UnexpectedNullCharacter;
+                    },
+                    '>' => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                        return ParseError.AbruptDoctypePublicIdentifier;
+                    },
+                    else => {
+                        self.publicIdentifier.append(next_char) catch unreachable;
+                    }
+                }
             },
             // 12.2.5.60 DOCTYPE public identifier (single-quoted) state
             .DOCTYPEPublicIdentifierSingleQuoted => {
-
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\'' => {
+                        self.state = .AfterDOCTYPEPublicIdentifier;
+                    },
+                    0x00 => {
+                        self.publicIdentifier.appendSlice("�") catch unreachable;
+                        return ParseError.UnexpectedNullCharacter;
+                    },
+                    '>' => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                        return ParseError.AbruptDoctypePublicIdentifier;
+                    },
+                    else => {
+                        self.publicIdentifier.append(next_char) catch unreachable;
+                    }
+                }
             },
             // 12.2.5.61 After DOCTYPE public identifier state
             .AfterDOCTYPEPublicIdentifier => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\t', 0x0A, 0x0C, ' ' => {
+                        self.state = .BetweenDOCTYPEPublicAndSystemIdentifiers;
+                    },
+                    '>' => {
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                    },
+                    '"' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierDoubleQuoted;
+                        return ParseError.MissingWhitespaceBetweenDoctypePublicAndSystemIdentifiers;
+                    },
+                    '\'' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierSingleQuoted;
+                        return ParseError.MissingWhitespaceBetweenDoctypePublicAndSystemIdentifiers;
+                    },
+                    else => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.reconsume = true;
+                        self.state = .BogusDOCTYPE;
+                        return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
+                    }
+                }
             },
             // 12.2.5.62 Between DOCTYPE public and system identifiers state
             .BetweenDOCTYPEPublicAndSystemIdentifiers => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\t', 0x0A, 0x0C, ' ' => {
+                        // Ignore and do nothing
+                    },
+                    '>' => {
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                    },
+                    '"' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierDoubleQuoted;
+                    },
+                    '\'' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierSingleQuoted;
+                    },
+                    else => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.reconsume = true;
+                        self.state = .BogusDOCTYPE;
+                        return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
+                    }
+                }
             },
             // 12.2.5.63 After DOCTYPE system keyword state
             .AfterDOCTYPESystemKeyword => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\t', 0x0A, 0x0C, ' ' => {
+                        self.state = .BeforeDOCTYPESystemIdentifier;
+                    },
+                    '"' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierDoubleQuoted;
+                        return ParseError.MissingWhitespaceAfterDoctypeSystemKeyword;
+                    },
+                    '\'' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierSingleQuoted;
+                        return ParseError.MissingWhitespaceAfterDoctypeSystemKeyword;
+                    },
+                    '>' => {
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                        return ParseError.MissingDoctypeSystemIdentifier;
+                    },
+                    else => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.reconsume = true;
+                        self.state = .BogusDOCTYPE;
+                        return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
+                    }
+                }
             },
             // 12.2.5.64 Before DOCTYPE system identifier state
             .BeforeDOCTYPESystemIdentifier => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\t', 0x0A, 0x0C, ' ' => {
+                        // Ignore and do nothing
+                    },
+                    '"' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierDoubleQuoted;
+                    },
+                    '\'' => {
+                        self.systemIdentifier.shrink(0);
+                        self.state = .DOCTYPESystemIdentifierSingleQuoted;
+                    },
+                    '>' => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                    },
+                    else => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.reconsume = true;
+                        self.state = .BogusDOCTYPE;
+                        return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
+                    }
+                }
             },
             // 12.2.5.65 DOCTYPE system identifier (double-quoted) state
             .DOCTYPESystemIdentifierDoubleQuoted => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '"' => {
+                        self.state = .AfterDOCTYPESystemIdentifier;
+                    },
+                    0x00 => {
+                        self.systemIdentifier.appendSlice("�") catch unreachable;
+                        return ParseError.UnexpectedNullCharacter;
+                    },
+                    '>' => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                        return ParseError.AbruptDoctypeSystemIdentifier;
+                    },
+                    else => {
+                        self.systemIdentifier.append(next_char) catch unreachable;
+                    }
+                }
             },
             // 12.2.5.66 DOCTYPE system identifier (single-quoted) state
             .DOCTYPESystemIdentifierSingleQuoted => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\'' => {
+                        self.state = .AfterDOCTYPESystemIdentifier;
+                    },
+                    0x00 => {
+                        self.systemIdentifier.appendSlice("�") catch unreachable;
+                        return ParseError.UnexpectedNullCharacter;
+                    },
+                    '>' => {
+                        self.currentToken.?.DOCTYPE.forceQuirks = true;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
+                        self.state = .Data;
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                        return ParseError.AbruptDoctypeSystemIdentifier;
+                    },
+                    else => {
+                        self.systemIdentifier.append(next_char) catch unreachable;
+                    }
+                }
             },
             // 12.2.5.67 After DOCTYPE system identifier state
             .AfterDOCTYPESystemIdentifier => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '\t', 0x0A, 0x0C, ' ' => {
+                        // Ignore and do nothing
+                    },
+                    '>' => {
+                        self.state = .Data;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                    },
+                    else => {
+                        self.reconsume = true;
+                        self.state = .BogusDOCTYPE;
+                        return ParseError.UnexpectedCharacterAfterDoctypeSystemIdentifier;
+                    }
+                }
             },
             // 12.2.5.68 Bogus DOCTYPE state
             .BogusDOCTYPE => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '>' => {
+                        self.state = .Data;
+                        self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
+                        self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
+                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.currentToken = null;
+                    },
+                    0x00 => {
+                        return ParseError.UnexpectedNullCharacter;
+                    },
+                    else => {
+                        // Ignore and do nothing
+                    }
+                }
             },
             // 12.2.5.69 CDATA section state
             .CDATASection => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    '[' => {
+                        self.state = .CDATASectionBracket;
+                    },
+                    else => {
+                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                    }
+                }
             },
             // 12.2.5.70 CDATA section bracket state
             .CDATASectionBracket => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    ']' => {
+                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                    },
+                    else => {
+                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.reconsume = true;
+                        self.state = .CDATASection;
+                    }
+                }
             },
             // 12.2.5.71 CDATA section end state
             .CDATASectionEnd => {
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    ']' => {
+                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                    },
+                    '>' => {
+                        self.state = .Data;
+                    },
+                    else => {
+                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.reconsume = true;
+                        self.state = .CDATASection;
+                    }
+                }
             },
             // 12.2.5.72 Character reference state
             .CharacterReference => {
-                unreachable;
+                self.temporaryBuffer.shrink(0);
+                self.temporaryBuffer.append('&') catch unreachable;
+                var next_char = self.nextChar();
+                if (std.ascii.isAlNum(next_char)) {
+                    self.reconsume = true;
+                    self.state = .NamedCharacterReference;
+                } else if (next_char == '#') {
+                    self.temporaryBuffer.append(next_char) catch unreachable;
+                    self.state = .NumericCharacterReference;
+                } else {
+                    self.temporaryBuffer.shrink(0);
+                    self.reconsume = true;
+                    self.state = self.returnState.?;
+                }
             },
             // 12.2.5.73 Named character reference state
             .NamedCharacterReference => {
                 // TODO: I need a state machine generator of some kind.
                 // https://github.com/adrian-thurston/ragel/issues/6
-                unreachable;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    ';' => {
+                        self.state = self.returnState.?;
+                    },
+                    else => {
+                        switch (self.returnState.?) {
+                            .AttributeName,
+                            .AttributeValueDoubleQuoted,
+                            .AttributeValueSingleQuoted,
+                            .AttributeValueUnquoted => {
+                                self.currentAttributeValue.append(next_char) catch unreachable;
+                            },
+                            else => {
+                                self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                            }
+                        }
+                    }
+                }
             },
             // 12.2.5.74 Ambiguous ampersand state
             .AmbiguousAmpersand => {
-                unreachable;
+                var next_char = self.nextChar();
+                if (std.ascii.isAlNum(next_char)) {
+                    switch (self.returnState.?) {
+                        .AttributeName,
+                        .AttributeValueDoubleQuoted,
+                        .AttributeValueSingleQuoted,
+                        .AttributeValueUnquoted => {
+                            self.currentAttributeValue.append(next_char) catch unreachable;
+                        },
+                        else => {
+                            self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        }
+                    }
+                } else if (next_char == ';') {
+                    self.reconsume = true;
+                    self.state = self.returnState.?;
+                    return ParseError.UnknownNamedCharacterReference;
+                } else {
+                    self.state = self.returnState.?;
+                    self.reconsume = true;
+                }
             },
             // 12.2.5.75 Numeric character reference state
             .NumericCharacterReference => {
-                unreachable;
+                self.characterReferenceCode = 0;
+                var next_char = self.nextChar();
+                switch (next_char) {
+                    'X', 'x' => {
+                        self.temporaryBuffer.append(next_char) catch unreachable;
+                        self.state = .HexadecimalCharacterReference;
+                    },
+                    else => {
+                        self.reconsume = true;
+                        self.state = .DecimalCharacterReferenceStart;
+                    }
+                }
             },
             // 12.2.5.76 Hexadecimal character reference start state
             .HexadecimalCharacterReferenceStart => {
-                unreachable;
+                var next_char = self.nextChar();
+                if (std.ascii.isDigit(next_char)) {
+                    self.reconsume = true;
+                    self.state = .HexadecimalCharacterReference;
+                } else {
+                    self.temporaryBuffer.shrink(0);
+                    self.reconsume = true;
+                    self.state = self.returnState.?;
+                    return ParseError.AbsenceOfDigitsInNumericCharacterReference;
+                }
             },
             // 12.2.5.77 Decimal character reference start state
             .DecimalCharacterReferenceStart => {
-                unreachable;
+                var next_char = self.nextChar();
+                if (std.ascii.isDigit(next_char)) {
+                    self.reconsume = true;
+                    self.state = .DecimalCharacterReference;
+                } else {
+                    self.temporaryBuffer.shrink(0);
+                    self.reconsume = true;
+                    self.state = self.returnState.?;
+                    return ParseError.AbsenceOfDigitsInNumericCharacterReference;
+                }
             },
             // 12.2.5.78 Hexadecimal character reference state
             .HexadecimalCharacterReference => {
-                unreachable;
+                var next_char = self.nextChar();
+                if (std.ascii.isDigit(next_char)) {
+                    self.characterReferenceCode *= 16;
+                    self.characterReferenceCode += (next_char - 0x0030);
+                } else if (std.ascii.isXDigit(next_char)) {
+                    self.characterReferenceCode *= 16;
+                    if (std.ascii.isUpper(next_char)) {
+                        self.characterReferenceCode += (next_char - 0x0037);
+                    } else {
+                        self.characterReferenceCode += (next_char - 0x0057);
+                    }
+                } else if (next_char == ';') {
+                    self.state = .NumericCharacterReferenceEnd;
+                } else {
+                    self.reconsume = true;
+                    self.state = .NumericCharacterReferenceEnd;
+                    return ParseError.MissingSemicolonAfterCharacterReference;
+                }
             },
             // 12.2.5.79 Decimal character reference state
             .DecimalCharacterReference => {
-                unreachable;
+                var next_char = self.nextChar();
+                if (std.ascii.isDigit(next_char)) {
+                    self.characterReferenceCode *= 10;
+                    self.characterReferenceCode += (next_char - 0x0030);
+                } else if (next_char == ';') {
+                    self.state = .NumericCharacterReferenceEnd;
+                } else {
+                    self.temporaryBuffer.shrink(0);
+                    self.reconsume = true;
+                    self.state = .NumericCharacterReferenceEnd;
+                    return ParseError.MissingSemicolonAfterCharacterReference;
+                }
             },
             // 12.2.5.80 Numeric character reference end state
             .NumericCharacterReferenceEnd => {
-                unreachable;
+                var err: ?ParseError = null;
+                switch (self.characterReferenceCode) {
+                    0x00 => {
+                        self.characterReferenceCode = 0xFFFD;
+                        err = ParseError.NullCharacterReference;
+                    },
+                    0xD800...0xDFFF => {
+                        self.characterReferenceCode = 0xFFFD;
+                        err = ParseError.SurrogateCharacterReference;
+                    },
+                    0xFDD0...0xFDEF, 0xFFFE, 0xFFFF, 0x1FFFE, 0x1FFFF, 0x2FFFE, 0x2FFFF,
+                    0x3FFFE, 0x3FFFF, 0x4FFFE, 0x4FFFF, 0x5FFFE, 0x5FFFF, 0x6FFFE, 0x6FFFF,
+                    0x7FFFE, 0x7FFFF, 0x8FFFE, 0x8FFFF, 0x9FFFE, 0x9FFFF, 0xAFFFE, 0xAFFFF,
+                    0xBFFFE, 0xBFFFF, 0xCFFFE, 0xCFFFF, 0xDFFFE, 0xDFFFF, 0xEFFFE, 0xEFFFF,
+                    0xFFFFE, 0xFFFFF, 0x10FFFE, 0x10FFFF => {
+                        err = ParseError.NoncharacterCharacterReference;
+                    },
+                    0x0001...0x001F, 0x007F...0x009F => {
+                        // TODO: Match against the control character reference code.
+                        err = ParseError.ControlCharacterReference;
+                    },
+                    else => {
+                        if (self.characterReferenceCode > 0x10FFFF) {
+                            self.characterReferenceCode = 0xFFFD;
+                            err = ParseError.CharacterReferenceOutsideUnicodeRange;
+                        }
+                    }
+                }
+                // TODO: Set the temporary buffer to the empty string. Append a code point equal to the
+                // character reference code to the temporary buffer. Flush code points consumed as a
+                // character reference.
+
+                self.state = self.returnState.?;
+                if (!(err == null)) return err.?;
             }
         }
 

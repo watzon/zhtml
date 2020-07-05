@@ -8,7 +8,7 @@ pub fn main() !void {
     var tokenizer = try Tokenizer.initWithFile(alloc, "./test.html");
     while (true) {
         var token = tokenizer.next() catch |err| {
-            std.log.err(.main, "{} at {}/{}\n", .{ err, tokenizer.line, tokenizer.column });
+            std.log.err(.main, "{} at line: {}, column: {}\n", .{ err, tokenizer.line, tokenizer.column });
             continue;
         };
 
