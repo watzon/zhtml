@@ -3,121 +3,8 @@ const mem = std.mem;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 
-fn isQuote(c: u8) bool {
-    return switch (c) {
-        '"', '\'' => true,
-        else => false
-    };
-}
-
-fn isWhitespace(c: u8) bool {
-    return switch (c) {
-        '\n', '\t', ' ', '\r' => true,
-        else => false
-    };
-}
-
-pub const ParseError = error {
-    UnexpectedNullCharacter,
-    UnexpectedQuestionMarkInsteadOfTagName,
-    InvalidFirstCharacterOfTagName,
-    MissingEndTagName,
-    MissingWhitespaceBeforeDoctypeName,
-    MissingDoctypeName,
-    UnexpectedEqualsSignBeforeAttributeName,
-    UnexpectedCharacterInAttributeName,
-    MissingAttributeValue,
-    UnexpectedCharacterInUnquotedAttributeValue,
-    MissingWhitespaceBetweenAttributes,
-    UnexpectedSolidusInTag,
-    AbruptClosingOfEmptyComment,
-    NestedComment,
-    IncorrectlyOpenedComment,
-    IncorrectlyClosedComment,
-    InvalidCharacterSequenceAfterDoctypeName,
-    MissingWhitespaceAfterDoctypePublicKeyword,
-    MissingDoctypePublicIdentifier,
-    MissingQuoteBeforeDoctypePublicIdentifier,
-    MissingQuoteBeforeDoctypeSystemIdentifier,
-    AbruptDoctypePublicIdentifier,
-    MissingWhitespaceBetweenDoctypePublicAndSystemIdentifiers,
-    MissingWhitespaceAfterDoctypeSystemKeyword,
-    MissingDoctypeSystemIdentifier,
-    UnexpectedCharacterAfterDoctypeSystemIdentifier,
-    AbruptDoctypeSystemIdentifier,
-    CdataInHtml,
-    UnknownNamedCharacterReference,
-    AbsenceOfDigitsInNumericCharacterReference,
-    MissingSemicolonAfterCharacterReference,
-    NullCharacterReference,
-    CharacterReferenceOutsideUnicodeRange,
-    SurrogateCharacterReference,
-    NoncharacterCharacterReference,
-    ControlCharacterReference
-};
-
-pub const Attribute = struct {
-    name:  []const u8,
-    value: []const u8,
-};
-
-/// Represents a token to be emitted by the {{Tokenizer}}.
-pub const Token = union(enum) {
-    DOCTYPE: struct {
-        name: ?[]const u8 = null,
-        publicIdentifier: ?[]const u8 = null,
-        systemIdentifier: ?[]const u8 = null,
-        forceQuirks: bool = false,
-    },
-    StartTag: struct {
-        name: ?[]const u8 = null,
-        selfClosing: bool = false,
-        attributes: ArrayList(Attribute),
-
-        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
-            try writer.writeAll("{ ");
-            try writer.print(".name = {}, .selfClosing = {}", .{ value.name, value.selfClosing });
-            if (value.attributes.items.len > 0) {
-                try writer.writeAll(", attributes = .{ ");
-                for (value.attributes.items) |attr, i| {
-                    try writer.print("{}: {}", .{ attr.name, attr.value });
-                    if (i + 1 < value.attributes.items.len)
-                        try writer.writeAll(", ");
-                }
-                try writer.writeAll(" }");
-            }
-            try writer.writeAll(" }");
-        }
-    },
-    EndTag: struct {
-        name: ?[]const u8 = null,
-        selfClosing: bool = false,
-        attributes: ArrayList(Attribute),
-
-        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
-            try writer.writeAll("{ ");
-            try writer.print(".name = {}, .selfClosing = {}", .{ value.name, value.selfClosing });
-            try writer.writeAll(" }");
-        }
-    },
-    Comment: struct {
-        data: ?[]const u8 = null,
-    },
-    Character: struct {
-        data: u21,
-
-        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
-            var char: [4]u8 = undefined;
-            var len = std.unicode.utf8Encode(value.data, char[0..]) catch unreachable;
-            if (char[0] == '\n') {
-                len = 2;
-                std.mem.copy(u8, char[0..2], "\\n");
-            }
-            try writer.print("\"{}\"", .{ char[0..len] });
-        }
-    },
-    EndOfFile,
-};
+const Token = @import("token.zig").Token;
+const ParseError = @import("parse_error.zig").ParseError;
 
 /// Represents the state of the HTML tokenizer as described
 /// [here](https://html.spec.whatwg.org/multipage/parsing.html#tokenization)
@@ -309,11 +196,11 @@ pub const Tokenizer = struct {
                         self.state = .TagOpen;
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = 0x00  } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = 0x00  } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -329,11 +216,11 @@ pub const Tokenizer = struct {
                         self.state = .RCDATALessThanSign;
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -345,11 +232,11 @@ pub const Tokenizer = struct {
                         self.state = .RAWTEXTLessThanSign;
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -361,11 +248,11 @@ pub const Tokenizer = struct {
                         self.state = .ScriptDataLessThanSign;
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -374,11 +261,11 @@ pub const Tokenizer = struct {
                 var next_char = self.nextChar();
                 switch (next_char) {
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -400,13 +287,13 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         if (std.ascii.isAlpha(next_char)) {
-                            self.currentToken = Token { .StartTag = .{ .attributes = ArrayList(Attribute).init(self.allocator) } };
+                            self.currentToken = Token { .StartTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
                             self.state = .TagName;
                             self.reconsume = true;
                         } else {
                             self.state = .Data;
                             self.reconsume = true;
-                            self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                            self.emitToken(Token { .Character = .{ .data = '<' } });
                             return ParseError.InvalidFirstCharacterOfTagName;
                         }
                     }
@@ -419,7 +306,7 @@ pub const Tokenizer = struct {
                     self.state = .Data;
                     return ParseError.MissingEndTagName;
                 } else if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Attribute).init(self.allocator) } };
+                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
                     self.state = .TagName;
                     self.reconsume = true;
                 } else {
@@ -447,11 +334,11 @@ pub const Tokenizer = struct {
                             else => {}
                         }
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
@@ -469,17 +356,17 @@ pub const Tokenizer = struct {
                 } else {
                     self.reconsume = true;
                     self.state = .RCDATA;
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
                 }
             },
             // 12.2.5.10 RCDATA end tag open state
             .RCDATAEndTagOpen => {
                 var next_char = self.nextChar();
                 if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token{ .EndTag = .{ .attributes = ArrayList(Attribute).init(self.allocator) } };
+                    self.currentToken = Token{ .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
                 } else {
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
-                    self.backlog.append(Token { .Character = .{ .data = '/' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
+                    self.emitToken(Token { .Character = .{ .data = '/' } });
                 }
                 self.reconsume = true;
                 self.state = .RCDATA;
@@ -499,7 +386,7 @@ pub const Tokenizer = struct {
                 } else {
                     self.reconsume = true;
                     self.state = .RAWTEXT;
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
                 }
             },
             // 12.2.5.13 RAWTEXT end tag open state
@@ -508,12 +395,12 @@ pub const Tokenizer = struct {
                 if (std.ascii.isAlpha(next_char)) {
                     self.reconsume = true;
                     self.state = .RAWTEXTEndTagName;
-                    self.backlog.append(Token { .EndTag = .{ .attributes = ArrayList(Attribute).init(self.allocator) } } ) catch unreachable;
+                    self.emitToken(Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } } );
                 } else {
                     self.reconsume = true;
                     self.state = .RAWTEXTEndTagName;
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
-                    self.backlog.append(Token { .Character = .{ .data = '/' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
+                    self.emitToken(Token { .Character = .{ .data = '/' } });
                 }
             },
             // 12.2.5.14 RAWTEXT end tag name state
@@ -531,13 +418,13 @@ pub const Tokenizer = struct {
                     },
                     '!' => {
                         self.state = .ScriptDataEscapeStart;
-                        self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
-                        self.backlog.append(Token { .Character = .{ .data = '!' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '<' } });
+                        self.emitToken(Token { .Character = .{ .data = '!' } });
                     },
                     else => {
                         self.reconsume = true;
                         self.state = .ScriptData;
-                        self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '<' } });
                     }
                 }
             },
@@ -545,14 +432,14 @@ pub const Tokenizer = struct {
             .ScriptDataEndTagOpen => {
                 var next_char = self.nextChar();
                 if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Attribute).init(self.allocator) } };
+                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
                     self.reconsume = true;
                     self.state = .ScriptDataEndTagName;
                 } else {
                     self.reconsume = true;
                     self.state = .ScriptData;
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
-                    self.backlog.append(Token { .Character = .{ .data = '/' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
+                    self.emitToken(Token { .Character = .{ .data = '/' } });
                 }
             },
             // 12.2.5.17 Script data end tag name state
@@ -564,7 +451,7 @@ pub const Tokenizer = struct {
                 var next_char = self.nextChar();
                 if (next_char == '-') {
                     self.state = .ScriptDataEscapeStart;
-                    self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '-' } });
                 } else {
                     self.reconsume = true;
                     self.state = .ScriptData;
@@ -575,7 +462,7 @@ pub const Tokenizer = struct {
                 var next_char = self.nextChar();
                 if (next_char == '-') {
                     self.state = .ScriptDataEscapedDashDash;
-                    self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '-' } });
                 } else {
                     self.reconsume = true;
                     self.state = .ScriptData;
@@ -587,17 +474,17 @@ pub const Tokenizer = struct {
                 switch (next_char) {
                     '-' => {
                         self.state = .ScriptDataEscapedDash;
-                        self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '-' } });
                     },
                     '<' => {
                         self.state = .ScriptDataEscapedLessThanSign;
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -607,18 +494,18 @@ pub const Tokenizer = struct {
                 switch (next_char) {
                     '-' => {
                         self.state = .ScriptDataEscapedDashDash;
-                        self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '-' } });
                     },
                     '<' => {
                         self.state = .ScriptDataEscapedLessThanSign;
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
                         self.state = .ScriptDataEscaped;
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -627,19 +514,19 @@ pub const Tokenizer = struct {
                 var next_char = self.nextChar();
                 switch (next_char) {
                     '-' => {
-                        self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '-' } });
                     },
                     '<' => {
                         self.state = .ScriptDataEscapedLessThanSign;
                     },
                     0x00 => {
                         self.state = .ScriptDataEscaped;
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
                         self.state = .ScriptDataEscaped;
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -653,25 +540,25 @@ pub const Tokenizer = struct {
                     self.temporaryBuffer.shrink(0);
                     self.reconsume = true;
                     self.state = .ScriptDataDoubleEscapeStart;
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
                 } else {
                     self.reconsume = true;
                     self.state = .ScriptDataEscaped;
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
                 }
             },
             // 12.2.5.24 Script data escaped end tag open state
             .ScriptDataEscapedEndTagOpen => {
                 var next_char = self.nextChar();
                 if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Attribute).init(self.allocator) } };
+                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
                     self.reconsume = true;
                     self.state = .ScriptDataEscapedEndTagName;
                 } else {
                     self.reconsume = true;
                     self.state = .ScriptDataEscaped;
-                    self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
-                    self.backlog.append(Token { .Character = .{ .data = '/' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '<' } });
+                    self.emitToken(Token { .Character = .{ .data = '/' } });
                 }
             },
             // 12.2.5.25 Script data escaped end tag name state
@@ -688,13 +575,13 @@ pub const Tokenizer = struct {
                         } else {
                             self.state = .ScriptDataEscaped;
                         }
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     },
                     else => {
                         if (std.ascii.isAlpha(next_char)) {
                             var lowered = std.ascii.toLower(next_char);
                             self.temporaryBuffer.append(lowered) catch unreachable;
-                            self.backlog.append(Token { .Character = .{ .data = lowered } }) catch unreachable;
+                            self.emitToken(Token { .Character = .{ .data = lowered } });
                         } else {
                             self.reconsume = true;
                             self.state = .ScriptDataEscaped;
@@ -708,18 +595,18 @@ pub const Tokenizer = struct {
                 switch (next_char) {
                     '-' => {
                         self.state = .ScriptDataDoubleEscapedDash;
-                        self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '-' } });
                     },
                     '<' => {
                         self.state = .ScriptDataDoubleEscapedLessThanSign;
-                        self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '<' } });
                     },
                     0x00 => {
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -729,20 +616,20 @@ pub const Tokenizer = struct {
                 switch (next_char) {
                     '-' => {
                         self.state = .ScriptDataDoubleEscapedDashDash;
-                        self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '-' } });
                     },
                     '<' => {
                         self.state = .ScriptDataDoubleEscapedLessThanSign;
-                        self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '<' } });
                     },
                     0x00 => {
                         self.state = .ScriptDataDoubleEscaped;
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
                         self.state = .ScriptDataDoubleEscaped;
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -751,24 +638,24 @@ pub const Tokenizer = struct {
                 var next_char = self.nextChar();
                 switch (next_char) {
                     '-' => {
-                        self.backlog.append(Token { .Character = .{ .data = '-' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '-' } });
                     },
                     '<' => {
                         self.state = .ScriptDataDoubleEscapedLessThanSign;
-                        self.backlog.append(Token { .Character = .{ .data = '<' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '<' } });
                     },
                     '>' => {
                         self.state = .ScriptData;
-                        self.backlog.append(Token { .Character = .{ .data = '>' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '>' } });
                     },
                     0x00 => {
                         self.state = .ScriptDataDoubleEscaped;
-                        self.backlog.append(Token { .Character = .{ .data = '�' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = '�' } });
                         return ParseError.UnexpectedNullCharacter;
                     },
                     else => {
                         self.state = .ScriptDataDoubleEscaped;
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -778,7 +665,7 @@ pub const Tokenizer = struct {
                 if (next_char == '/') {
                     self.temporaryBuffer.shrink(0);
                     self.state = .ScriptDataDoubleEscapeEnd;
-                    self.backlog.append(Token { .Character = .{ .data = '/' } }) catch unreachable;
+                    self.emitToken(Token { .Character = .{ .data = '/' } });
                 } else {
                     self.reconsume = true;
                     self.state = .ScriptDataDoubleEscaped;
@@ -794,13 +681,13 @@ pub const Tokenizer = struct {
                         } else {
                             self.state = .ScriptDataDoubleEscaped;
                         }
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     },
                     else => {
                         if (std.ascii.isAlpha(next_char)) {
                             var lowered = std.ascii.toLower(next_char);
                             self.temporaryBuffer.append(lowered) catch unreachable;
-                            self.backlog.append(Token { .Character = .{ .data = lowered } }) catch unreachable;
+                            self.emitToken(Token { .Character = .{ .data = lowered } });
                         } else {
                             self.reconsume = true;
                             self.state = .ScriptDataDoubleEscaped;
@@ -873,7 +760,7 @@ pub const Tokenizer = struct {
                         self.state = .BeforeAttributeValue;
                     },
                     '>' => {
-                        const attr = Attribute{
+                        const attr = Token.Attribute{
                             .name = self.currentAttributeName.toOwnedSlice(),
                             .value = self.currentAttributeValue.toOwnedSlice(),
                         };
@@ -889,7 +776,7 @@ pub const Tokenizer = struct {
                             else => {}
                         }
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     else => {
@@ -914,7 +801,7 @@ pub const Tokenizer = struct {
                         self.state = .AttributeValueSingleQuoted;
                     },
                     '>' => {
-                        const attr = Attribute{
+                        const attr = Token.Attribute{
                             .name = self.currentAttributeName.toOwnedSlice(),
                             .value = self.currentAttributeValue.toOwnedSlice(),
                         };
@@ -930,7 +817,7 @@ pub const Tokenizer = struct {
                             else => {}
                         }
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.MissingAttributeValue;
                     },
@@ -992,7 +879,7 @@ pub const Tokenizer = struct {
                         self.state = .CharacterReference;
                     },
                     '>' => {
-                        const attr = Attribute{
+                        const attr = Token.Attribute{
                             .name = self.currentAttributeName.toOwnedSlice(),
                             .value = self.currentAttributeValue.toOwnedSlice(),
                         };
@@ -1008,7 +895,7 @@ pub const Tokenizer = struct {
                             else => {}
                         }
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     '"', '\'', '<', '=', '`' => {
@@ -1031,7 +918,7 @@ pub const Tokenizer = struct {
                         self.state = .SelfClosingStartTag;
                     },
                     '>' => {
-                        const attr = Attribute{
+                        const attr = Token.Attribute{
                             .name = self.currentAttributeName.toOwnedSlice(),
                             .value = self.currentAttributeValue.toOwnedSlice(),
                         };
@@ -1047,7 +934,7 @@ pub const Tokenizer = struct {
                             else => {}
                         }
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     else => {
@@ -1073,7 +960,7 @@ pub const Tokenizer = struct {
                             else => {}
                         }
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     else => {
@@ -1089,7 +976,7 @@ pub const Tokenizer = struct {
                 switch (next_char) {
                     '>' => {
                         self.state = .Data;
-                        self.backlog.append(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } }) catch unreachable;
+                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
                     },
                     0x00 => {
                         self.commentData.appendSlice("�") catch unreachable;
@@ -1115,9 +1002,9 @@ pub const Tokenizer = struct {
                     // FIXME: Consume those characters. If there is an adjusted current node and it is not
                     // an element in the HTML namespace, then switch to the CDATA section state.
                     self.index += 7;
-                    self.backlog.append(Token { .Comment = .{ .data = "[CDATA[" } }) catch unreachable;
+                    self.emitToken(Token { .Comment = .{ .data = "[CDATA[" } });
                     self.state = .BogusComment;
-                    return ParseError.CdataInHtml;
+                    return ParseError.CDATAInHtmlContent;
                 } else {
                     self.state = .BogusComment;
                 }
@@ -1131,7 +1018,7 @@ pub const Tokenizer = struct {
                     },
                     '>' => {
                         self.state = .Data;  
-                        self.backlog.append(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } }) catch unreachable;
+                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
                         return ParseError.AbruptClosingOfEmptyComment;
                     },
                     else => {
@@ -1149,7 +1036,7 @@ pub const Tokenizer = struct {
                     },
                     '>' => {
                         self.state = .Data;  
-                        self.backlog.append(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } }) catch unreachable;
+                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
                         return ParseError.AbruptClosingOfEmptyComment;
                     },
                     else => {
@@ -1257,7 +1144,7 @@ pub const Tokenizer = struct {
                 switch (next_char) {
                     '>' => {
                         self.state = .Data;
-                        self.backlog.append(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } }) catch unreachable;
+                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
                     },
                     '!' => {
                         self.state = .CommentEndBang;
@@ -1282,7 +1169,7 @@ pub const Tokenizer = struct {
                     },
                     '>' => {
                         self.state = .Data;
-                        self.backlog.append(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } }) catch unreachable;
+                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
                         return ParseError.IncorrectlyClosedComment;
                     },
                     else => {
@@ -1324,7 +1211,7 @@ pub const Tokenizer = struct {
                     '>' => {
                         self.currentToken = Token { .DOCTYPE = .{ .forceQuirks = true } };
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.MissingDoctypeName;
                     },
@@ -1347,7 +1234,7 @@ pub const Tokenizer = struct {
                         var name = self.tokenData.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.name = name;
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     0x00 => {
@@ -1372,7 +1259,7 @@ pub const Tokenizer = struct {
                     '>' => {
                         self.index += 1;
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     else => {
@@ -1418,7 +1305,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.MissingDoctypePublicIdentifier;
                     },
@@ -1454,7 +1341,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     else => {
@@ -1485,7 +1372,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.AbruptDoctypePublicIdentifier;
                     },
@@ -1511,7 +1398,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.AbruptDoctypePublicIdentifier;
                     },
@@ -1529,7 +1416,7 @@ pub const Tokenizer = struct {
                     },
                     '>' => {
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     '"' => {
@@ -1562,7 +1449,7 @@ pub const Tokenizer = struct {
                     },
                     '>' => {
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     '"' => {
@@ -1603,7 +1490,7 @@ pub const Tokenizer = struct {
                     },
                     '>' => {
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.MissingDoctypeSystemIdentifier;
                     },
@@ -1639,7 +1526,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     else => {
@@ -1670,7 +1557,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.AbruptDoctypeSystemIdentifier;
                     },
@@ -1696,7 +1583,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
                         self.state = .Data;
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                         return ParseError.AbruptDoctypeSystemIdentifier;
                     },
@@ -1717,7 +1604,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     else => {
@@ -1736,7 +1623,7 @@ pub const Tokenizer = struct {
                         self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                         self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
-                        self.backlog.append(self.currentToken.?) catch unreachable;
+                        self.emitToken(self.currentToken.?);
                         self.currentToken = null;
                     },
                     0x00 => {
@@ -1755,7 +1642,7 @@ pub const Tokenizer = struct {
                         self.state = .CDATASectionBracket;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = next_char } });
                     }
                 }
             },
@@ -1764,11 +1651,11 @@ pub const Tokenizer = struct {
                 var next_char = self.nextChar();
                 switch (next_char) {
                     ']' => {
-                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = ']' } });
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
-                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = ']' } });
+                        self.emitToken(Token { .Character = .{ .data = ']' } });
                         self.reconsume = true;
                         self.state = .CDATASection;
                     }
@@ -1779,14 +1666,14 @@ pub const Tokenizer = struct {
                 var next_char = self.nextChar();
                 switch (next_char) {
                     ']' => {
-                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = ']' } });
                     },
                     '>' => {
                         self.state = .Data;
                     },
                     else => {
-                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
-                        self.backlog.append(Token { .Character = .{ .data = ']' } }) catch unreachable;
+                        self.emitToken(Token { .Character = .{ .data = ']' } });
+                        self.emitToken(Token { .Character = .{ .data = ']' } });
                         self.reconsume = true;
                         self.state = .CDATASection;
                     }
@@ -1827,7 +1714,7 @@ pub const Tokenizer = struct {
                                 self.currentAttributeValue.append(next_char) catch unreachable;
                             },
                             else => {
-                                self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                                self.emitToken(Token { .Character = .{ .data = next_char } });
                             }
                         }
                     }
@@ -1845,7 +1732,7 @@ pub const Tokenizer = struct {
                             self.currentAttributeValue.append(next_char) catch unreachable;
                         },
                         else => {
-                            self.backlog.append(Token { .Character = .{ .data = next_char } }) catch unreachable;
+                            self.emitToken(Token { .Character = .{ .data = next_char } });
                         }
                     }
                 } else if (next_char == ';') {
@@ -1981,13 +1868,8 @@ pub const Tokenizer = struct {
         return false;
     }
 
-    fn lastToken(self: *Self) ?Token {
-        var token_count = self.tokens.items.len;
-        if (token_count > 0) {
-            return self.tokens.items[token_count - 1];
-        } else {
-            return null;
-        }
+    pub fn emitToken(self: *Self, token: Token) void {
+        self.backlog.append(token) catch unreachable;
     }
 
     fn nextChar(self: *Self) u8 {
@@ -2042,30 +1924,5 @@ pub const Tokenizer = struct {
     fn getIndex(self: *Self) usize {
         if (self.index == 0) return 0;
         return self.index - 1;
-    }
-
-    fn nextCharIgnoreWhitespace(self: *Self) u8 {
-        var c = self.nextChar();
-        while (isWhitespace(c)) c = self.nextChar();
-        return c;
-    }
-
-    fn ignoreWhitespace(self: Self) u8 {
-        var c = self.curChar();
-        while (isWhitespace(c)) {
-            c = self.nextChar();
-        }
-        return c;
-    }
-
-    fn isNewline(self: Self, c: u8) bool {
-        var n = c;
-        if (n == '\r') {
-            n = self.peekChar();
-        }
-        if (n == '\n') {
-            return true;
-        }
-        return false;
     }
 };
