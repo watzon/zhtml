@@ -1809,8 +1809,9 @@ pub const Tokenizer = struct {
     }
 
     pub fn eof(self: Self) bool {
-        if (self.index >= self.contents.len) return true;
-        return false;
+        // if we're reconsuming, then we can still read the last character
+        const max_index = if (self.reconsume) self.contents.len else self.contents.len - 1;
+        return self.index > max_index;
     }
 
     pub fn emitToken(self: *Self, token: Token) void {
