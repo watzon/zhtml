@@ -169,7 +169,7 @@ pub const Tokenizer = struct {
         self.deinit();
     }
 
-    pub fn next(self: *Self) ParseError!?Token {
+    pub fn nextToken(self: *Self) ParseError!?Token {
         // If the token backlog contains items, pop the last one and
         // return it.
         if (self.backlog.items.len > 0) {
