@@ -1,7 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const ArrayList = std.ArrayList;
-const StringHashMap = std.StringHashMap;
+const StringHashMap = std.hash_map.StringHashMap;
 
 const Token = @import("token.zig").Token;
 const ParseError = @import("parse_error.zig").ParseError;
@@ -287,7 +287,7 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         if (std.ascii.isAlpha(next_char)) {
-                            self.currentToken = Token { .StartTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
+                            self.currentToken = Token { .StartTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
                             self.state = .TagName;
                             self.reconsume = true;
                         } else {
@@ -306,7 +306,7 @@ pub const Tokenizer = struct {
                     self.state = .Data;
                     return ParseError.MissingEndTagName;
                 } else if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
+                    self.currentToken = Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
                     self.state = .TagName;
                     self.reconsume = true;
                 } else {
@@ -363,7 +363,7 @@ pub const Tokenizer = struct {
             .RCDATAEndTagOpen => {
                 var next_char = self.nextChar();
                 if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token{ .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
+                    self.currentToken = Token{ .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
                 } else {
                     self.emitToken(Token { .Character = .{ .data = '<' } });
                     self.emitToken(Token { .Character = .{ .data = '/' } });
@@ -395,7 +395,7 @@ pub const Tokenizer = struct {
                 if (std.ascii.isAlpha(next_char)) {
                     self.reconsume = true;
                     self.state = .RAWTEXTEndTagName;
-                    self.emitToken(Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } } );
+                    self.emitToken(Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } } );
                 } else {
                     self.reconsume = true;
                     self.state = .RAWTEXTEndTagName;
@@ -432,7 +432,7 @@ pub const Tokenizer = struct {
             .ScriptDataEndTagOpen => {
                 var next_char = self.nextChar();
                 if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
+                    self.currentToken = Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
                     self.reconsume = true;
                     self.state = .ScriptDataEndTagName;
                 } else {
@@ -551,7 +551,7 @@ pub const Tokenizer = struct {
             .ScriptDataEscapedEndTagOpen => {
                 var next_char = self.nextChar();
                 if (std.ascii.isAlpha(next_char)) {
-                    self.currentToken = Token { .EndTag = .{ .attributes = ArrayList(Token.Attribute).init(self.allocator) } };
+                    self.currentToken = Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
                     self.reconsume = true;
                     self.state = .ScriptDataEscapedEndTagName;
                 } else {
@@ -1819,17 +1819,15 @@ pub const Tokenizer = struct {
 
     fn addAttributeToCurrentToken(self: *Self) void {
         if (self.currentAttributeName.items.len < 1) return;
-        const attr = Token.Attribute{
-            .name = self.currentAttributeName.toOwnedSlice(),
-            .value = self.currentAttributeValue.toOwnedSlice(),
-        };
+        var name = self.currentAttributeName.toOwnedSlice();
+        var value = self.currentAttributeValue.toOwnedSlice();
         switch (self.currentToken.?) {
             .StartTag => |*tag| {
-                tag.attributes.append(attr) catch unreachable;
+                _ = tag.attributes.put(name, value) catch unreachable;
                 tag.name = self.tokenData.toOwnedSlice();
             },
             .EndTag => |*tag| {
-                tag.attributes.append(attr) catch unreachable;
+                _= tag.attributes.put(name, value) catch unreachable;
                 tag.name = self.tokenData.toOwnedSlice();
             },
             else => {}

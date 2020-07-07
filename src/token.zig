@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const StringHashMap = std.hash_map.StringHashMap;
 const ArrayList = std.ArrayList;
 
 /// Represents a token to be emitted by the {{Tokenizer}}.
@@ -13,16 +14,16 @@ pub const Token = union(enum) {
     StartTag: struct {
         name: ?[]const u8 = null,
         selfClosing: bool = false,
-        attributes: ArrayList(Attribute),
+        attributes: StringHashMap([]const u8),
 
         pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
             try writer.writeAll("{ ");
             try writer.print(".name = {}, .selfClosing = {}", .{ value.name, value.selfClosing });
-            if (value.attributes.items.len > 0) {
+            if (value.attributes.items().len > 0) {
                 try writer.writeAll(", attributes = .{ ");
-                for (value.attributes.items) |attr, i| {
-                    try writer.print("{}: \"{}\"", .{ attr.name, attr.value });
-                    if (i + 1 < value.attributes.items.len)
+                for (value.attributes.items()) |entry, i| {
+                    try writer.print("{}: \"{}\"", .{ entry.key, entry.value });
+                    if (i + 1 < value.attributes.items().len)
                         try writer.writeAll(", ");
                 }
                 try writer.writeAll(" }");
@@ -33,7 +34,7 @@ pub const Token = union(enum) {
     EndTag: struct {
         name: ?[]const u8 = null,
         selfClosing: bool = false,
-        attributes: ArrayList(Attribute),
+        attributes: StringHashMap([]const u8),
 
         pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
             try writer.writeAll("{ ");

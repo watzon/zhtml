@@ -1,4 +1,5 @@
 pub const ParseError = error {
+    Default,
     AbruptClosingOfEmptyComment,
     AbruptDoctypePublicIdentifier,
     AbruptDoctypeSystemIdentifier,
