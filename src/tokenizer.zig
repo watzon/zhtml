@@ -1714,9 +1714,11 @@ pub const Tokenizer = struct {
                         self.temporaryBuffer.append(next_char) catch unreachable;
                         self.state = .NumericCharacterReference;
                     } else {
-                        self.flushTemporaryBufferAsCharacterReference();
+                        const emitted = self.flushTemporaryBufferAsCharacterReference();
                         self.reconsume = true;
                         self.state = self.returnState.?;
+                        if (emitted)
+                            return self.popQueuedErrorOrToken();
                     }
                 },
                 // 12.2.5.73 Named character reference state
@@ -1725,6 +1727,8 @@ pub const Tokenizer = struct {
                     const peeked = self.peekChar();
                     
                     // Read input characters until the next_char is not alpha-numeric
+                    // TODO: This should actually only be matching prefixes of valid character references
+                    //       See the example in 12.2.5.73
                     while (std.ascii.isAlNum(next_char)) : (next_char = self.nextChar())
                         self.temporaryBuffer.append(next_char) catch unreachable;
                     self.temporaryBuffer.append(next_char) catch unreachable;
@@ -1732,23 +1736,28 @@ pub const Tokenizer = struct {
                     const collected = self.temporaryBuffer.items;
                     if (self.namedCharacterReferenceTable.contains(collected)) {
                         if (self.inAttributeState() and next_char != ';' and (std.ascii.isAlNum(peeked) or peeked == '=')) {
-                            self.flushTemporaryBufferAsCharacterReference();
+                            const emitted = self.flushTemporaryBufferAsCharacterReference();
                             self.state = self.returnState.?;
+                            if (emitted)
+                                return self.popQueuedErrorOrToken();
                         } else {
                             const ncr = self.temporaryBuffer.toOwnedSlice();
                             const codepoint = self.namedCharacterReferenceTable.get(ncr).?;
                             
-                            self.flushCodepointAsCharacterReference(codepoint);
+                            const emitted = self.flushCodepointAsCharacterReference(codepoint);
                             self.state = self.returnState.?;
 
                             if (self.currentChar() != ';')
                                 return ParseError.MissingSemicolonAfterCharacterReference;
-                            return null;
+                            if (emitted)
+                                return self.popQueuedErrorOrToken();
                         }
+                    } else {
+                        const emitted = self.flushTemporaryBufferAsCharacterReference();
+                        self.state = .AmbiguousAmpersand;
+                        if (emitted)
+                            return self.popQueuedErrorOrToken();
                     }
-
-                    self.flushTemporaryBufferAsCharacterReference();
-                    self.state = .AmbiguousAmpersand;
                 },
                 // 12.2.5.74 Ambiguous ampersand state
                 .AmbiguousAmpersand => {
@@ -1877,10 +1886,11 @@ pub const Tokenizer = struct {
                         }
                     }
                     const codepoint = @intCast(u21, self.characterReferenceCode);
-                    self.flushCodepointAsCharacterReference(codepoint);
+                    const emitted = self.flushCodepointAsCharacterReference(codepoint);
 
                     self.state = self.returnState.?;
-                    if (!(err == null)) return err.?;
+                    if (err != null) return err.?;
+                    if (emitted) return self.popQueuedErrorOrToken();
                 }
             }
         }
@@ -1926,10 +1936,12 @@ pub const Tokenizer = struct {
         };
     }
 
-    fn flushTemporaryBufferAsCharacterReference(self: *Self) void {
+    /// Returns true if at least one token was emitted, false otherwise
+    fn flushTemporaryBufferAsCharacterReference(self: *Self) bool {
         const characterReference = self.temporaryBuffer.toOwnedSlice();
         if (self.inAttributeState()) {
             self.currentAttributeValue.appendSlice(characterReference) catch unreachable;
+            return false;
         } else {
             var i: usize = characterReference.len - 1;
             while (i >= 0) {
@@ -1937,18 +1949,22 @@ pub const Tokenizer = struct {
                 if (i == 0) break;
                 i -= 1;
             }
+            return true;
         }
     }
 
-    fn flushCodepointAsCharacterReference(self: *Self, codepoint: u21) void {
+    /// Returns true if at least one token was emitted, false otherwise
+    fn flushCodepointAsCharacterReference(self: *Self, codepoint: u21) bool {
         if (self.inAttributeState()) {
             var char: [4]u8 = undefined;
             var len = std.unicode.utf8Encode(codepoint, char[0..]) catch unreachable;
             self.temporaryBuffer.appendSlice(char[0..len]) catch unreachable;
             self.currentAttributeValue.appendSlice(self.temporaryBuffer.toOwnedSlice()) catch unreachable;
+            return false;
         } else {
             self.temporaryBuffer.shrink(0);
             self.emitToken(Token { .Character = .{ .data = codepoint } });
+            return true;
         }
     }
 
