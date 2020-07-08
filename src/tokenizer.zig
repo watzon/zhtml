@@ -197,23 +197,26 @@ pub const Tokenizer = struct {
             switch (self.state) {
                 // 12.2.5.1 Data state
                 .Data => {
-                    var next_char = self.nextChar();
-                    switch (next_char) {
-                        '&' => {
-                            self.returnState = .Data;
-                            self.state = .CharacterReference;
-                        },
-                        '<' => {
-                            self.state = .TagOpen;
-                        },
-                        0x00 => {
-                            self.emitToken(Token { .Character = .{ .data = 0x00  } });
-                            return ParseError.UnexpectedNullCharacter;
-                        },
-                        else => {
-                            self.emitToken(Token { .Character = .{ .data = next_char } });
-                            return self.popQueuedErrorOrToken();
+                    if (self.nextChar()) |next_char| {
+                        switch (next_char) {
+                            '&' => {
+                                self.returnState = .Data;
+                                self.state = .CharacterReference;
+                            },
+                            '<' => {
+                                self.state = .TagOpen;
+                            },
+                            0x00 => {
+                                self.emitToken(Token { .Character = .{ .data = 0x00  } });
+                                return ParseError.UnexpectedNullCharacter;
+                            },
+                            else => {
+                                self.emitToken(Token { .Character = .{ .data = next_char } });
+                                return self.popQueuedErrorOrToken();
+                            }
                         }
+                    } else {
+                        return Token.EndOfFile;
                     }
                 },
                 // 12.2.5.2 RCDATA state
@@ -993,7 +996,7 @@ pub const Tokenizer = struct {
                     var next_seven = self.peekN(7);
                     var lowered = std.ascii.allocLowerString(self.allocator, next_seven) catch unreachable;
 
-                    if (mem.eql(u8, next_seven[0..2], "--")) {
+                    if (next_seven.len >= 2 and mem.eql(u8, next_seven[0..2], "--")) {
                         self.index += 2;
                         self.state = .CommentStart;
                     } else if (mem.eql(u8, lowered, "doctype")) {
@@ -1008,6 +1011,8 @@ pub const Tokenizer = struct {
                         return ParseError.CDATAInHtmlContent;
                     } else {
                         self.state = .BogusComment;
+                        // FIXME: Create a comment token whose data is the empty string.
+                        return ParseError.IncorrectlyOpenedComment;
                     }
                 },
                 // 12.2.5.43 Comment start state
