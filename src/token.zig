@@ -58,7 +58,6 @@ pub const Token = union(enum) {
             try writer.print("\"{}\"", .{ char[0..len] });
         }
     },
-    EndOfFile,
 
     pub const Attribute = struct {
         name:  []const u8,

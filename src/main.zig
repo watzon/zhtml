@@ -14,7 +14,8 @@ pub fn main() !void {
 
         if (token) |tok| {
             std.log.info(.main, "{}\n", .{ tok });
-            if (tok == .EndOfFile) break;
+        } else {
+            break;
         }
     }
 }
