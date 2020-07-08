@@ -12,10 +12,9 @@ pub fn main() !void {
             continue;
         };
 
-        if (token) |tok| {
-            std.log.info(.main, "{}\n", .{ tok });
-        } else {
+        if (token == .EndOfFile)
             break;
-        }
+
+        std.log.info(.main, "{}\n", .{ token });
     }
 }

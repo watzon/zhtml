@@ -183,19 +183,15 @@ pub const Tokenizer = struct {
     }
 
     /// null being returned always signifies EOF
-    pub fn nextToken(self: *Self) ParseError!?Token {
+    pub fn nextToken(self: *Self) ParseError!Token {
         // Clear out any backlog before continuing
-        if (self.popQueuedErrorOrToken()) |optional_token| {
-            if (optional_token != null) {
-                return optional_token;
-            }
-        } else |err| {
-            return err;
+        if (self.hasQueuedErrorOrToken()) {
+            return self.popQueuedErrorOrToken();
         }
 
         while (true) {
             if (self.eof()) {
-                return null;
+                return Token.EndOfFile;
             }
 
             switch (self.state) {
@@ -1900,7 +1896,12 @@ pub const Tokenizer = struct {
         return self.index >= max_index;
     }
 
-    fn popQueuedErrorOrToken(self: *Self) ParseError!?Token {
+    fn hasQueuedErrorOrToken(self: *Self) bool {
+        return self.errorQueue.count > 0 or self.backlog.count > 0;
+    }
+
+    /// Must be certain that an error or token exists in the queue, see hasQueuedErrorOrToken
+    fn popQueuedErrorOrToken(self: *Self) ParseError!Token {
         // check errors first
         if (self.errorQueue.readItem()) |err_int| {
             return @errSetCast(ParseError, @intToError(err_int));
@@ -1908,7 +1909,7 @@ pub const Tokenizer = struct {
         if (self.backlog.readItem()) |token| {
             return token;
         }
-        return null;
+        unreachable;
     }
 
     pub fn emitToken(self: *Self, token: Token) void {

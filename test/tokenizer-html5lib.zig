@@ -106,15 +106,13 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u8, expected_tokens: []
             continue;
         };
 
-        if (token) |tok| {
-            const expected_token = expected_tokens[num_tokens];
-            std.debug.print("expected: {}\nactual:   {}\n\n", .{ expected_token, tok });
-            expectEqualTokens(expected_token, tok);
-            num_tokens += 1;
-        } else {
-            std.debug.print("EOF\n", .{});
+        if (token == Token.EndOfFile)
             break;
-        }
+
+        const expected_token = expected_tokens[num_tokens];
+        std.debug.print("expected: {}\nactual:   {}\n\n", .{ expected_token, token });
+        expectEqualTokens(expected_token, token);
+        num_tokens += 1;
     }
     testing.expectEqual(expected_tokens.len, num_tokens);
     testing.expectEqual(expected_errors.len, num_errors);
