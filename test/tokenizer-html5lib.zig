@@ -245,7 +245,6 @@ fn expectEqualTokens(expected: Token, actual: Token) void {
         .EndTag => {
             testing.expectEqualSlices(u8, expected.EndTag.name.?, actual.EndTag.name.?);
             testing.expectEqual(expected.EndTag.selfClosing, actual.EndTag.selfClosing);
-            expectEqualAttributes(expected.EndTag.attributes, actual.EndTag.attributes);
         },
         .Comment => {
             expectEqualNullableSlices(u8, expected.Comment.data, actual.Comment.data);
