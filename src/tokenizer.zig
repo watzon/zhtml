@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.hash_map.StringHashMap;
+const LinearFifo = std.fifo.LinearFifo;
 
 const Token = @import("token.zig").Token;
 const ParseError = @import("parse_error.zig").ParseError;
@@ -98,7 +99,8 @@ pub const Tokenizer = struct {
     allocator: *mem.Allocator,
     state: State = .Data,
     returnState: ?State = null,
-    backlog: ArrayList(Token),
+    // TODO: This could potentially use .Static if we can guarantee some maximum number of tokens emitted at a time
+    backlog: LinearFifo(Token, .Dynamic),
     // denotes if contents have been heap allocated (from a file)
     allocated: bool,
     filename: []const u8,
@@ -122,7 +124,7 @@ pub const Tokenizer = struct {
     pub fn initWithFile(allocator: *mem.Allocator, filename: []const u8) !Tokenizer {
         var contents = try std.fs.cwd().readFileAlloc(allocator, filename, std.math.maxInt(usize));
         var tokenizer = try Tokenizer.initWithString(allocator, contents);
-        tokenizer.backlog = ArrayList(Token).init(allocator);
+        tokenizer.backlog = LinearFifo(Token, .Dynamic).init(allocator);
         tokenizer.filename = filename;
         tokenizer.allocated = true;
         tokenizer.tokenData = ArrayList(u8).init(allocator);
@@ -140,7 +142,7 @@ pub const Tokenizer = struct {
         return Tokenizer{
             .allocator = allocator,
             .allocated = false,
-            .backlog = ArrayList(Token).init(allocator),
+            .backlog = LinearFifo(Token, .Dynamic).init(allocator),
             .tokenData = ArrayList(u8).init(allocator),
             .temporaryBuffer = ArrayList(u8).init(allocator),
             .publicIdentifier = ArrayList(u8).init(allocator),
@@ -170,10 +172,9 @@ pub const Tokenizer = struct {
     }
 
     pub fn nextToken(self: *Self) ParseError!?Token {
-        // If the token backlog contains items, pop the last one and
-        // return it.
-        if (self.backlog.items.len > 0) {
-            return self.backlog.pop();
+        // If the token backlog contains items, pop the first one and return it.
+        if (self.backlog.readItem()) |token| {
+            return token;
         }
 
         // Check if we're at the EndOfFile. If so, for now, just return an
@@ -1814,7 +1815,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn emitToken(self: *Self, token: Token) void {
-        self.backlog.append(token) catch unreachable;
+        self.backlog.writeItem(token) catch unreachable;
     }
 
     fn addAttributeToCurrentToken(self: *Self) void {
