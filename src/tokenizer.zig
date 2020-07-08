@@ -193,15 +193,11 @@ pub const Tokenizer = struct {
             return err;
         }
 
-        // Check if we're at the EndOfFile. If so, for now, just return an
-        // EndOfFile token, but later we'll need to do specific checking inside
-        // of the below switch statement.
-        if (self.eof()) {
-            std.debug.print("self.eof() == true\n", .{});
-            return null;
-        }
-
         while (true) {
+            if (self.eof()) {
+                return null;
+            }
+
             switch (self.state) {
                 // 12.2.5.1 Data state
                 .Data => {
