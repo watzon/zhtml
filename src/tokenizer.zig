@@ -1897,7 +1897,7 @@ pub const Tokenizer = struct {
     pub fn eof(self: Self) bool {
         // if we're reconsuming, then we can still read the last character
         const max_index = if (self.reconsume) self.contents.len else self.contents.len - 1;
-        return self.index > max_index;
+        return self.index >= max_index;
     }
 
     fn popQueuedErrorOrToken(self: *Self) ParseError!?Token {
@@ -1981,57 +1981,93 @@ pub const Tokenizer = struct {
         }
     }
 
-    fn nextChar(self: *Self) u8 {
+    /// Returns null on EOF
+    fn nextChar(self: *Self) ?u8 {
         if (self.reconsume) {
             self.reconsume = false;
             return self.currentChar();
         }
 
-        if (self.index >= self.contents.len) {
-            return 0; // EOF
+        if (self.index + 1 >= self.contents.len) {
+            return null; // EOF
         }
 
+        self.index += 1;
         var c = self.contents[self.index];
         if (c == '\n') {
             self.line += 1;
             self.column = 0;
         }
 
-        self.index += 1;
         self.column += 1;
         return c;
     }
 
     fn currentChar(self: *Self) u8 {
-        if (self.index == 0) {
-            return self.contents[self.index];
-        } else if (self.index >= self.contents.len) {
-            return self.contents[self.contents.len - 1];
-        } else {
-            return self.contents[self.index - 1];
-        }
+        return self.contents[self.index];
     }
 
-    fn peekChar(self: *Self) u8 {
+    /// Returns null on EOF
+    fn peekChar(self: *Self) ?u8 {
         if (self.reconsume) {
             return self.currentChar();
         }
 
-        if (self.index >= self.contents.len) {
-            return 0; // EOF
+        if (self.index + 1 >= self.contents.len) {
+            return null; // EOF
         }
 
-        return self.contents[self.index];
+        return self.contents[self.index + 1];
     }
 
+    /// Can return less than the requested `n` characters if EOF is reached
     fn peekN(self: *Self, n: usize) []const u8 {
-        // TODO: Error handling
-        var index = self.getIndex();
-        return self.contents[(index + 1)..(index + n + 1)];
+        const start = std.math.min(self.contents.len, self.index + 1);
+        const end = std.math.min(self.contents.len, start + n);
+        return self.contents[start..end];
     }
 
     fn getIndex(self: *Self) usize {
-        if (self.index == 0) return 0;
-        return self.index - 1;
+        return self.index;
     }
 };
+
+test "nextChar, currentChar, peekChar, peekN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tokenizer = try Tokenizer.initWithString(&arena.allocator, "abcdefghijklmnop");
+    defer tokenizer.deinit();
+
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar());
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar());
+    std.testing.expectEqual(@as(u8, 'b'), tokenizer.peekChar().?);
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar());
+    std.testing.expectEqual(@as(u8, 'b'), tokenizer.nextChar().?);
+    std.testing.expectEqual(@as(u8, 'b'), tokenizer.currentChar());
+    std.testing.expectEqual(@as(u8, 'c'), tokenizer.peekChar().?);
+
+    std.testing.expectEqualSlices(u8, "c", tokenizer.peekN(1));
+    std.testing.expectEqualSlices(u8, "cdefg", tokenizer.peekN(5));
+    std.testing.expectEqualSlices(u8, "cdefghijklmnop", tokenizer.peekN(100));
+
+    // go to EOF
+    while (tokenizer.nextChar()) |c| {}
+
+    std.testing.expectEqual(true, tokenizer.eof());
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.currentChar());
+    std.testing.expect(null == tokenizer.nextChar());
+    std.testing.expect(null == tokenizer.peekChar());
+    std.testing.expectEqualSlices(u8, "", tokenizer.peekN(100)); 
+
+    // reconsume
+    tokenizer.reconsume = true;
+    std.testing.expectEqual(false, tokenizer.eof());
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.peekChar().?);
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.peekChar().?);
+    // nextChar flips reconsume off
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.nextChar().?);
+
+    std.testing.expectEqual(true, tokenizer.eof());
+    std.testing.expect(null == tokenizer.nextChar());
+    std.testing.expect(null == tokenizer.peekChar());
+}
