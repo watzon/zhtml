@@ -250,6 +250,7 @@ fn expectEqualTokens(expected: Token, actual: Token) void {
         .Character => {
             testing.expectEqual(expected.Character.data, actual.Character.data);
         },
+        .EndOfFile => unreachable,
     }
 }
 
