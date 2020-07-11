@@ -93,6 +93,9 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u8, expected_tokens: []
     while (true) {
         var token = tokenizer.nextToken() catch |err| {
             std.log.err(.main, "{} at line: {}, column: {}\n", .{ err, tokenizer.line, tokenizer.column });
+            if (expected_errors.len == 0) {
+                unreachable;
+            }
             var error_found = false;
             const id = ErrorInfo.errorToSpecId(err);
             for (expected_errors) |expected_error| {
@@ -230,18 +233,18 @@ fn expectEqualTokens(expected: Token, actual: Token) void {
     testing.expect(@as(TokenTag, actual) == @as(TokenTag, expected));
     switch (expected) {
         .DOCTYPE => {
-            testing.expectEqualSlices(u8, expected.DOCTYPE.name.?, actual.DOCTYPE.name.?);
+            expectEqualNullableSlices(u8, expected.DOCTYPE.name, actual.DOCTYPE.name);
             expectEqualNullableSlices(u8, expected.DOCTYPE.publicIdentifier, actual.DOCTYPE.publicIdentifier);
             expectEqualNullableSlices(u8, expected.DOCTYPE.systemIdentifier, actual.DOCTYPE.systemIdentifier);
             testing.expectEqual(expected.DOCTYPE.forceQuirks, actual.DOCTYPE.forceQuirks);
         },
         .StartTag => {
-            testing.expectEqualSlices(u8, expected.StartTag.name.?, actual.StartTag.name.?);
+            expectEqualNullableSlices(u8, expected.StartTag.name, actual.StartTag.name);
             testing.expectEqual(expected.StartTag.selfClosing, actual.StartTag.selfClosing);
             expectEqualAttributes(expected.StartTag.attributes, actual.StartTag.attributes);
         },
         .EndTag => {
-            testing.expectEqualSlices(u8, expected.EndTag.name.?, actual.EndTag.name.?);
+            expectEqualNullableSlices(u8, expected.EndTag.name, actual.EndTag.name);
             testing.expectEqual(expected.EndTag.selfClosing, actual.EndTag.selfClosing);
         },
         .Comment => {

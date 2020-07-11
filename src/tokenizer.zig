@@ -1095,14 +1095,17 @@ pub const Tokenizer = struct {
 
                     if (next_seven.len >= 2 and mem.eql(u8, next_seven[0..2], "--")) {
                         self.index += 2;
+                        self.column += 2;
                         self.state = .CommentStart;
                     } else if (std.ascii.eqlIgnoreCase(next_seven, "DOCTYPE")) {
                         self.index += 7;
+                        self.column += 7;
                         self.state = .DOCTYPE;
                     } else if (mem.eql(u8, next_seven, "[CDATA[")) {
                         // FIXME: Consume those characters. If there is an adjusted current node and it is not
                         // an element in the HTML namespace, then switch to the CDATA section state.
                         self.index += 7;
+                        self.column += 7;
                         self.emitToken(Token { .Comment = .{ .data = "[CDATA[" } });
                         self.state = .BogusComment;
                         return ParseError.CDATAInHtmlContent;
@@ -1308,6 +1311,7 @@ pub const Tokenizer = struct {
                                 self.state = .BeforeDOCTYPEName;
                             },
                             '>' => {
+                                self.state = .BeforeDOCTYPEName;
                                 self.reconsume = true;
                             },
                             else => {
@@ -1394,9 +1398,11 @@ pub const Tokenizer = struct {
                         switch (next_char) {
                             '\t', 0x0A, 0x0C, ' ' => {
                                 self.index += 1; // consume
+                                self.column += 1;
                             },
                             '>' => {
                                 self.index += 1; // consume
+                                self.column += 1;
                                 self.state = .Data;
                                 self.emitToken(self.currentToken.?);
                                 self.currentToken = null;
@@ -1406,9 +1412,11 @@ pub const Tokenizer = struct {
                                 var next_six = self.peekN(6);
                                 if (std.ascii.eqlIgnoreCase(next_six, "PUBLIC")) {
                                     self.index += 6;
+                                    self.column += 6;
                                     self.state = .AfterDOCTYPEPublicKeyword;
                                 } else if (std.ascii.eqlIgnoreCase(next_six, "SYSTEM")) {
                                     self.index += 6; 
+                                    self.column += 6;
                                     self.state = .AfterDOCTYPESystemKeyword;
                                 } else {
                                     // reconsume, but since we peek'd to begin with, no need to actually set reconsume here
@@ -1423,6 +1431,7 @@ pub const Tokenizer = struct {
                         }
                     } else {
                         self.index += 1; // consume
+                        self.column += 1;
                         self.currentToken.?.DOCTYPE.forceQuirks = true;
                         self.emitToken(self.currentToken.?);
                         self.emitToken(Token.EndOfFile);
@@ -1588,6 +1597,7 @@ pub const Tokenizer = struct {
                             },
                             '>' => {
                                 self.state = .Data;
+                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
                                 self.emitToken(self.currentToken.?);
                                 self.currentToken = null;
                                 return self.popQueuedErrorOrToken();
@@ -2207,6 +2217,7 @@ pub const Tokenizer = struct {
 
         if (self.index + 1 > self.contents.len) {
             self.index = self.contents.len + 1; // consume the EOF
+            // TODO: handle column increment
             return null; // EOF
         }
 
