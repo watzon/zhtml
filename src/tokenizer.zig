@@ -1931,10 +1931,10 @@ pub const Tokenizer = struct {
                         self.temporaryBuffer.append(next_char.?) catch unreachable;
                         self.state = .NumericCharacterReference;
                     } else {
-                        const emitted = self.flushTemporaryBufferAsCharacterReference();
+                        self.flushTemporaryBufferAsCharacterReference();
                         self.reconsume = true;
                         self.state = self.returnState.?;
-                        if (emitted)
+                        if (self.hasQueuedErrorOrToken())
                             return self.popQueuedErrorOrToken();
                     }
                 },
@@ -1953,26 +1953,26 @@ pub const Tokenizer = struct {
                     const collected = self.temporaryBuffer.items;
                     if (self.namedCharacterReferenceTable.contains(collected)) {
                         if (self.inAttributeState() and next_char != ';' and (std.ascii.isAlNum(peeked) or peeked == '=')) {
-                            const emitted = self.flushTemporaryBufferAsCharacterReference();
+                            self.flushTemporaryBufferAsCharacterReference();
                             self.state = self.returnState.?;
-                            if (emitted)
+                            if (self.hasQueuedErrorOrToken())
                                 return self.popQueuedErrorOrToken();
                         } else {
                             const ncr = self.temporaryBuffer.toOwnedSlice();
                             const codepoint = self.namedCharacterReferenceTable.get(ncr).?;
                             
-                            const emitted = self.flushCodepointAsCharacterReference(codepoint);
+                            self.flushCodepointAsCharacterReference(codepoint);
                             self.state = self.returnState.?;
 
                             if (self.currentChar().? != ';') // TODO: handle EOF
                                 return ParseError.MissingSemicolonAfterCharacterReference;
-                            if (emitted)
+                            if (self.hasQueuedErrorOrToken())
                                 return self.popQueuedErrorOrToken();
                         }
                     } else {
-                        const emitted = self.flushTemporaryBufferAsCharacterReference();
+                        self.flushTemporaryBufferAsCharacterReference();
                         self.state = .AmbiguousAmpersand;
-                        if (emitted)
+                        if (self.hasQueuedErrorOrToken())
                             return self.popQueuedErrorOrToken();
                     }
                 },
@@ -2104,11 +2104,11 @@ pub const Tokenizer = struct {
                         }
                     }
                     const codepoint = @intCast(u21, self.characterReferenceCode);
-                    const emitted = self.flushCodepointAsCharacterReference(codepoint);
+                    self.flushCodepointAsCharacterReference(codepoint);
 
                     self.state = self.returnState.?;
                     if (err != null) return err.?;
-                    if (emitted) return self.popQueuedErrorOrToken();
+                    if (self.hasQueuedErrorOrToken()) return self.popQueuedErrorOrToken();
                 }
             }
         }
@@ -2158,13 +2158,10 @@ pub const Tokenizer = struct {
         };
     }
 
-    // TODO: revert these back to void and use hasQueuedErrorOrToken instead
-    /// Returns true if at least one token was emitted, false otherwise
-    fn flushTemporaryBufferAsCharacterReference(self: *Self) bool {
+    fn flushTemporaryBufferAsCharacterReference(self: *Self) void {
         const characterReference = self.temporaryBuffer.toOwnedSlice();
         if (self.inAttributeState()) {
             self.currentAttributeValue.appendSlice(characterReference) catch unreachable;
-            return false;
         } else {
             var i: usize = characterReference.len - 1;
             while (i >= 0) {
@@ -2172,22 +2169,18 @@ pub const Tokenizer = struct {
                 if (i == 0) break;
                 i -= 1;
             }
-            return true;
         }
     }
 
-    /// Returns true if at least one token was emitted, false otherwise
-    fn flushCodepointAsCharacterReference(self: *Self, codepoint: u21) bool {
+    fn flushCodepointAsCharacterReference(self: *Self, codepoint: u21) void {
         if (self.inAttributeState()) {
             var char: [4]u8 = undefined;
             var len = std.unicode.utf8Encode(codepoint, char[0..]) catch unreachable;
             self.temporaryBuffer.appendSlice(char[0..len]) catch unreachable;
             self.currentAttributeValue.appendSlice(self.temporaryBuffer.toOwnedSlice()) catch unreachable;
-            return false;
         } else {
             self.temporaryBuffer.shrink(0);
             self.emitToken(Token { .Character = .{ .data = codepoint } });
-            return true;
         }
     }
 
