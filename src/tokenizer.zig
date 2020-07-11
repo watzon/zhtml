@@ -594,6 +594,10 @@ pub const Tokenizer = struct {
                             '<' => {
                                 self.state = .ScriptDataEscapedLessThanSign;
                             },
+                            '>' => {
+                                self.state = .ScriptData;
+                                self.emitToken(Token { .Character = .{ .data = '>' } });
+                            },
                             0x00 => {
                                 self.state = .ScriptDataEscaped;
                                 self.emitToken(Token { .Character = .{ .data = '�' } });
