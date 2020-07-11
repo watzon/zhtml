@@ -2260,7 +2260,7 @@ pub const Tokenizer = struct {
         if (self.eof()) {
             return self.contents[0..0];
         }
-        const start = std.math.min(self.contents.len, self.index);
+        const start = std.math.min(self.contents.len, if (self.reconsume) self.index - 1 else self.index);
         const end = std.math.min(self.contents.len, start + n);
         return self.contents[start..end];
     }
@@ -2307,8 +2307,8 @@ test "nextChar, currentChar, peekChar, peekN" {
     tokenizer.reconsume = true;
     std.testing.expectEqual(@as(u8, 'p'), tokenizer.currentChar().?);
     std.testing.expectEqual(@as(u8, 'p'), tokenizer.peekChar().?);
-    std.testing.expectEqual(@as(u8, 'p'), tokenizer.nextChar().?);
     std.testing.expectEqualSlices(u8, "p", tokenizer.peekN(100));
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.nextChar().?);
 
     // consume EOF
     std.testing.expect(null == tokenizer.nextChar());
