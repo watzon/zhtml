@@ -816,7 +816,7 @@ pub const Tokenizer = struct {
                             },
                             '=' => {
                                 self.currentAttributeName.shrink(0);
-                                self.currentAttributeName.append(self.currentChar()) catch unreachable;
+                                self.currentAttributeName.append(next_char) catch unreachable;
                                 self.currentAttributeValue.shrink(0);
                                 self.state = .AttributeName;
                                 return ParseError.UnexpectedEqualsSignBeforeAttributeName;
@@ -1950,7 +1950,7 @@ pub const Tokenizer = struct {
                             const emitted = self.flushCodepointAsCharacterReference(codepoint);
                             self.state = self.returnState.?;
 
-                            if (self.currentChar() != ';')
+                            if (self.currentChar().? != ';') // TODO: handle EOF
                                 return ParseError.MissingSemicolonAfterCharacterReference;
                             if (emitted)
                                 return self.popQueuedErrorOrToken();
@@ -2102,10 +2102,9 @@ pub const Tokenizer = struct {
         unreachable;
     }
 
+    /// Returns true if that last char consumed is EOF
     pub fn eof(self: Self) bool {
-        // if we're reconsuming, then we can still read the last character
-        const max_index = if (self.reconsume) self.contents.len else self.contents.len - 1;
-        return self.index >= max_index;
+        return self.index > self.contents.len;
     }
 
     fn hasQueuedErrorOrToken(self: *Self) bool {
@@ -2202,23 +2201,30 @@ pub const Tokenizer = struct {
             return self.currentChar();
         }
 
-        if (self.index + 1 >= self.contents.len) {
+        if (self.index + 1 > self.contents.len) {
+            self.index = self.contents.len + 1; // consume the EOF
             return null; // EOF
         }
 
-        self.index += 1;
         var c = self.contents[self.index];
         if (c == '\n') {
             self.line += 1;
             self.column = 0;
         }
 
+        self.index += 1;
         self.column += 1;
         return c;
     }
 
-    fn currentChar(self: *Self) u8 {
-        return self.contents[self.index];
+    fn currentChar(self: *Self) ?u8 {
+        if (self.index == 0) {
+            return self.contents[self.index];
+        } else if (self.eof()) {
+            return null;
+        } else {
+            return self.contents[self.index - 1];
+        }
     }
 
     /// Returns null on EOF
@@ -2231,12 +2237,15 @@ pub const Tokenizer = struct {
             return null; // EOF
         }
 
-        return self.contents[self.index + 1];
+        return self.contents[self.index];
     }
 
     /// Can return less than the requested `n` characters if EOF is reached
     fn peekN(self: *Self, n: usize) []const u8 {
-        const start = std.math.min(self.contents.len, self.index + 1);
+        if (self.eof()) {
+            return self.contents[0..0];
+        }
+        const start = std.math.min(self.contents.len, self.index);
         const end = std.math.min(self.contents.len, start + n);
         return self.contents[start..end];
     }
@@ -2252,36 +2261,53 @@ test "nextChar, currentChar, peekChar, peekN" {
     var tokenizer = try Tokenizer.initWithString(&arena.allocator, "abcdefghijklmnop");
     defer tokenizer.deinit();
 
-    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar());
-    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar());
+    // before consuming anything, current/peek/next should all get the first char
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar().?);
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar().?);
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.peekChar().?);
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar().?);
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.nextChar().?);
+
+    // after the first consume, current should give the last consumed char
+    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar().?);
+    // peek should give the next
     std.testing.expectEqual(@as(u8, 'b'), tokenizer.peekChar().?);
-    std.testing.expectEqual(@as(u8, 'a'), tokenizer.currentChar());
-    std.testing.expectEqual(@as(u8, 'b'), tokenizer.nextChar().?);
-    std.testing.expectEqual(@as(u8, 'b'), tokenizer.currentChar());
-    std.testing.expectEqual(@as(u8, 'c'), tokenizer.peekChar().?);
 
-    std.testing.expectEqualSlices(u8, "c", tokenizer.peekN(1));
-    std.testing.expectEqualSlices(u8, "cdefg", tokenizer.peekN(5));
-    std.testing.expectEqualSlices(u8, "cdefghijklmnop", tokenizer.peekN(100));
+    std.testing.expectEqualSlices(u8, "b", tokenizer.peekN(1));
+    std.testing.expectEqualSlices(u8, "bcdef", tokenizer.peekN(5));
+    std.testing.expectEqualSlices(u8, "bcdefghijklmnop", tokenizer.peekN(100));
 
-    // go to EOF
-    while (tokenizer.nextChar()) |c| {}
+    // go to last char
+    while (tokenizer.nextChar()) |c| {
+        if (c == 'p') break;
+    }
+
+    std.testing.expectEqual(false, tokenizer.eof());
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.currentChar().?);
+    // next should be EOF
+    std.testing.expect(null == tokenizer.peekChar());
+    std.testing.expectEqualSlices(u8, "", tokenizer.peekN(100));
+
+    // reconsume the last char
+    tokenizer.reconsume = true;
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.currentChar().?);
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.peekChar().?);
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.nextChar().?);
+    std.testing.expectEqualSlices(u8, "p", tokenizer.peekN(100));
+
+    // consume EOF
+    std.testing.expect(null == tokenizer.nextChar());
 
     std.testing.expectEqual(true, tokenizer.eof());
-    std.testing.expectEqual(@as(u8, 'p'), tokenizer.currentChar());
+    // current, next, and peek should be eof
+    std.testing.expect(null == tokenizer.currentChar());
     std.testing.expect(null == tokenizer.nextChar());
     std.testing.expect(null == tokenizer.peekChar());
     std.testing.expectEqualSlices(u8, "", tokenizer.peekN(100)); 
 
-    // reconsume
+    // reconsume still gives us EOF
     tokenizer.reconsume = true;
-    std.testing.expectEqual(false, tokenizer.eof());
-    std.testing.expectEqual(@as(u8, 'p'), tokenizer.peekChar().?);
-    std.testing.expectEqual(@as(u8, 'p'), tokenizer.peekChar().?);
-    // nextChar flips reconsume off
-    std.testing.expectEqual(@as(u8, 'p'), tokenizer.nextChar().?);
-
     std.testing.expectEqual(true, tokenizer.eof());
+    std.testing.expect(null == tokenizer.currentChar());
     std.testing.expect(null == tokenizer.nextChar());
-    std.testing.expect(null == tokenizer.peekChar());
 }
