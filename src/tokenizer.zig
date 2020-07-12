@@ -2253,7 +2253,7 @@ pub const Tokenizer = struct {
         if (self.eof()) {
             return self.contents[0..0];
         }
-        const start = std.math.min(self.contents.len, if (self.reconsume) self.index - 1 else self.index);
+        const start = if (self.reconsume) self.index - 1 else self.index;
         const end = std.math.min(self.contents.len, start + n);
         return self.contents[start..end];
     }
