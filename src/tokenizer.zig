@@ -2241,7 +2241,7 @@ pub const Tokenizer = struct {
             return self.currentChar();
         }
 
-        if (self.index + 1 >= self.contents.len) {
+        if (self.index + 1 > self.contents.len) {
             return null; // EOF
         }
 
@@ -2285,10 +2285,16 @@ test "nextChar, currentChar, peekChar, peekN" {
     std.testing.expectEqualSlices(u8, "bcdef", tokenizer.peekN(5));
     std.testing.expectEqualSlices(u8, "bcdefghijklmnop", tokenizer.peekN(100));
 
-    // go to last char
+    // go to second-to-last char
     while (tokenizer.nextChar()) |c| {
-        if (c == 'p') break;
+        if (c == 'o') break;
     }
+
+    std.testing.expectEqual(false, tokenizer.eof());
+    std.testing.expectEqual(@as(u8, 'o'), tokenizer.currentChar().?);
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.peekChar().?);
+    std.testing.expectEqualSlices(u8, "p", tokenizer.peekN(100));
+    std.testing.expectEqual(@as(u8, 'p'), tokenizer.nextChar().?);
 
     std.testing.expectEqual(false, tokenizer.eof());
     std.testing.expectEqual(@as(u8, 'p'), tokenizer.currentChar().?);
