@@ -33,7 +33,9 @@ pub const Token = union(enum) {
     },
     EndTag: struct {
         name: ?[]const u8 = null,
+        /// Ignored past tokenization, only used for errors
         selfClosing: bool = false,
+        /// Ignored past tokenization, only used for errors
         attributes: StringHashMap([]const u8),
 
         pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
@@ -59,9 +61,4 @@ pub const Token = union(enum) {
         }
     },
     EndOfFile,
-
-    pub const Attribute = struct {
-        name:  []const u8,
-        value: []const u8,
-    };
 };

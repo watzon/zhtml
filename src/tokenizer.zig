@@ -116,14 +116,9 @@ pub const Tokenizer = struct {
     index: usize,
     reconsume: bool = false,
 
-    tokenData: ArrayList(u8),
     temporaryBuffer: ArrayList(u8),
-    publicIdentifier: ArrayList(u8),
-    systemIdentifier: ArrayList(u8),
-    commentData: ArrayList(u8),
-    currentAttributeName: ArrayList(u8),
-    currentAttributeValue: ArrayList(u8),
-    currentToken: ?Token = null,
+    lastEmittedStartTag: ?Token = null,
+    currentToken: IncompleteToken,
     characterReferenceCode: usize = 0,
     namedCharacterReferenceTable: StringHashMap(u21),
 
@@ -135,13 +130,7 @@ pub const Tokenizer = struct {
         tokenizer.errorQueue = LinearFifo(ParseErrorIntType, .Dynamic).init(allocator);
         tokenizer.filename = filename;
         tokenizer.allocated = true;
-        tokenizer.tokenData = ArrayList(u8).init(allocator);
         tokenizer.temporaryBuffer = ArrayList(u8).init(allocator);
-        tokenizer.publicIdentifier = ArrayList(u8).init(allocator);
-        tokenizer.systemIdentifier = ArrayList(u8).init(allocator);
-        tokenizer.commentData = ArrayList(u8).init(allocator);
-        tokenizer.currentAttributeName = ArrayList(u8).init(allocator);
-        tokenizer.currentAttributeValue = ArrayList(u8).init(allocator);
         tokenizer.namedCharacterReferenceTable = buildNamedCharacterReferenceTable(allocator);
         return tokenizer;
     }
@@ -153,14 +142,9 @@ pub const Tokenizer = struct {
             .allocated = false,
             .backlog = LinearFifo(Token, .Dynamic).init(allocator),
             .errorQueue = LinearFifo(ParseErrorIntType, .Dynamic).init(allocator),
-            .tokenData = ArrayList(u8).init(allocator),
             .temporaryBuffer = ArrayList(u8).init(allocator),
-            .publicIdentifier = ArrayList(u8).init(allocator),
-            .systemIdentifier = ArrayList(u8).init(allocator),
-            .commentData = ArrayList(u8).init(allocator),
-            .currentAttributeName = ArrayList(u8).init(allocator),
-            .currentAttributeValue = ArrayList(u8).init(allocator),
             .namedCharacterReferenceTable = buildNamedCharacterReferenceTable(allocator),
+            .currentToken = IncompleteToken.init(allocator),
             .filename = "",
             .contents = str,
             .line = 1,
@@ -312,14 +296,14 @@ pub const Tokenizer = struct {
                                 self.state = .EndTagOpen;
                             },
                             '?' => {
-                                self.currentToken = Token { .Comment = .{ } };
+                                self.currentToken.create(.Comment);
                                 self.state = .BogusComment;
                                 self.reconsume = true;
                                 return ParseError.UnexpectedQuestionMarkInsteadOfTagName;
                             },
                             else => {
                                 if (std.ascii.isAlpha(next_char)) {
-                                    self.currentToken = Token { .StartTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
+                                    self.currentToken.create(.StartTag);
                                     self.state = .TagName;
                                     self.reconsume = true;
                                 } else {
@@ -343,11 +327,11 @@ pub const Tokenizer = struct {
                             self.state = .Data;
                             return ParseError.MissingEndTagName;
                         } else if (std.ascii.isAlpha(next_char)) {
-                            self.currentToken = Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
+                            self.currentToken.create(.EndTag);
                             self.state = .TagName;
                             self.reconsume = true;
                         } else {
-                            self.currentToken = Token { .Comment = .{ } };
+                            self.currentToken.create(.Comment);
                             self.reconsume = true;
                             self.state = .BogusComment;
                             return ParseError.InvalidFirstCharacterOfTagName;
@@ -370,24 +354,17 @@ pub const Tokenizer = struct {
                                 self.state = .SelfClosingStartTag;
                             },
                             '>' => {
-                                var name = self.tokenData.toOwnedSlice();
-                                switch (self.currentToken.?) {
-                                    .StartTag => |*tag| tag.name = name,
-                                    .EndTag => |*tag| tag.name = name,
-                                    else => {}
-                                }
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             0x00 => {
-                                self.emitToken(Token { .Character = .{ .data = '�' } });
+                                self.currentToken.tokenData.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             else => {
                                 var lowered = std.ascii.toLower(next_char);
-                                self.tokenData.append(lowered) catch unreachable;
+                                self.currentToken.tokenData.append(lowered) catch unreachable;
                             }
                         }
                     } else {
@@ -412,7 +389,7 @@ pub const Tokenizer = struct {
                 .RCDATAEndTagOpen => {
                     var next_char = self.nextChar();
                     if (next_char != null and std.ascii.isAlpha(next_char.?)) {
-                        self.currentToken = Token{ .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
+                        self.currentToken.create(.EndTag);
                         self.reconsume = true;
                         self.state = .RCDATA;
                     } else {
@@ -425,9 +402,51 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.11 RCDATA end tag name state
                 .RCDATAEndTagName => {
-                    // TODO: Requires more state data than is currently available.
-                    // https://html.spec.whatwg.org/multipage/parsing.html#rcdata-end-tag-name-state
-                    unreachable;
+                    if (self.nextChar()) |next_char| {
+                        switch(next_char) {
+                            '\t', 0x0A, 0x0C, ' ' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .BeforeAttributeName;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '/' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .SelfClosingStartTag;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '>' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .Data;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            'A'...'Z' => {
+                                self.currentToken.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            'a'...'z' => {
+                                self.currentToken.tokenData.append(next_char) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            else => {}, // fallthrough
+                        }
+                    }
+                    // anything else
+                    self.emitToken(Token{ .Character = .{ .data = '<' } });
+                    self.emitToken(Token{ .Character = .{ .data = '/' } });
+                    for (self.temporaryBuffer.items) |char| {
+                        self.emitToken(Token{ .Character = .{ .data = char } });
+                    }
+                    self.reconsume = true;
+                    self.state = .RCDATA;
+                    return self.popQueuedErrorOrToken();
                 },
                 // 12.2.5.12 RAWTEXT less-than sign state
                 .RAWTEXTLessThanSign => {
@@ -446,10 +465,9 @@ pub const Tokenizer = struct {
                 .RAWTEXTEndTagOpen => {
                     var next_char = self.nextChar();
                     if (next_char != null and std.ascii.isAlpha(next_char.?)) {
+                        self.currentToken.create(.EndTag);
                         self.reconsume = true;
                         self.state = .RAWTEXTEndTagName;
-                        self.emitToken(Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } } );
-                        return self.popQueuedErrorOrToken();
                     } else {
                         self.reconsume = true;
                         self.state = .RAWTEXT;
@@ -460,8 +478,51 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.14 RAWTEXT end tag name state
                 .RAWTEXTEndTagName => {
-                    // TODO: Reqiures more state information than we have available right now
-                    unreachable;
+                    if (self.nextChar()) |next_char| {
+                        switch(next_char) {
+                            '\t', 0x0A, 0x0C, ' ' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .BeforeAttributeName;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '/' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .SelfClosingStartTag;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '>' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .Data;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            'A'...'Z' => {
+                                self.currentToken.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            'a'...'z' => {
+                                self.currentToken.tokenData.append(next_char) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            else => {}, // fallthrough
+                        }
+                    }
+                    // anything else
+                    self.emitToken(Token{ .Character = .{ .data = '<' } });
+                    self.emitToken(Token{ .Character = .{ .data = '/' } });
+                    for (self.temporaryBuffer.items) |char| {
+                        self.emitToken(Token{ .Character = .{ .data = char } });
+                    }
+                    self.reconsume = true;
+                    self.state = .RAWTEXT;
+                    return self.popQueuedErrorOrToken();
                 },
                 // 12.2.5.15 Script data less-than sign state
                 .ScriptDataLessThanSign => {
@@ -491,7 +552,7 @@ pub const Tokenizer = struct {
                 .ScriptDataEndTagOpen => {
                     var next_char = self.nextChar();
                     if (next_char != null and std.ascii.isAlpha(next_char.?)) {
-                        self.currentToken = Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
+                        self.currentToken.create(.EndTag);
                         self.reconsume = true;
                         self.state = .ScriptDataEndTagName;
                     } else {
@@ -504,7 +565,51 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.17 Script data end tag name state
                 .ScriptDataEndTagName => {
-                    unreachable;
+                    if (self.nextChar()) |next_char| {
+                        switch(next_char) {
+                            '\t', 0x0A, 0x0C, ' ' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .BeforeAttributeName;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '/' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .SelfClosingStartTag;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '>' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .Data;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            'A'...'Z' => {
+                                self.currentToken.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            'a'...'z' => {
+                                self.currentToken.tokenData.append(next_char) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            else => {}, // fallthrough
+                        }
+                    }
+                    // anything else
+                    self.emitToken(Token{ .Character = .{ .data = '<' } });
+                    self.emitToken(Token{ .Character = .{ .data = '/' } });
+                    for (self.temporaryBuffer.items) |char| {
+                        self.emitToken(Token{ .Character = .{ .data = char } });
+                    }
+                    self.reconsume = true;
+                    self.state = .ScriptData;
+                    return self.popQueuedErrorOrToken();
                 },
                 // 12.2.5.18 Script data escape start state
                 .ScriptDataEscapeStart => {
@@ -637,7 +742,7 @@ pub const Tokenizer = struct {
                 .ScriptDataEscapedEndTagOpen => {
                     var next_char = self.nextChar();
                     if (next_char != null and std.ascii.isAlpha(next_char.?)) {
-                        self.currentToken = Token { .EndTag = .{ .attributes = StringHashMap([]const u8).init(self.allocator) } };
+                        self.currentToken.create(.EndTag);
                         self.reconsume = true;
                         self.state = .ScriptDataEscapedEndTagName;
                     } else {
@@ -650,7 +755,51 @@ pub const Tokenizer = struct {
                 },
                 // 12.2.5.25 Script data escaped end tag name state
                 .ScriptDataEscapedEndTagName => {
-                    unreachable;
+                    if (self.nextChar()) |next_char| {
+                        switch(next_char) {
+                            '\t', 0x0A, 0x0C, ' ' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .BeforeAttributeName;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '/' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .SelfClosingStartTag;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            '>' => {
+                                if (self.currentToken.isAppropriateEndTag(self)) {
+                                    self.state = .Data;
+                                    continue;
+                                }
+                                // else fallthrough to anything else
+                            },
+                            'A'...'Z' => {
+                                self.currentToken.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            'a'...'z' => {
+                                self.currentToken.tokenData.append(next_char) catch unreachable;
+                                self.temporaryBuffer.append(next_char) catch unreachable;
+                                continue;
+                            },
+                            else => {}, // fallthrough
+                        }
+                    }
+                    // anything else
+                    self.emitToken(Token{ .Character = .{ .data = '<' } });
+                    self.emitToken(Token{ .Character = .{ .data = '/' } });
+                    for (self.temporaryBuffer.items) |char| {
+                        self.emitToken(Token{ .Character = .{ .data = char } });
+                    }
+                    self.reconsume = true;
+                    self.state = .ScriptDataEscaped;
+                    return self.popQueuedErrorOrToken();
                 },
                 // 12.2.5.26 Script data double escape start state
                 .ScriptDataDoubleEscapeStart => {
@@ -819,17 +968,18 @@ pub const Tokenizer = struct {
                                 self.reconsume = true;
                             },
                             '=' => {
-                                self.currentAttributeName.shrink(0);
-                                self.currentAttributeName.append(next_char) catch unreachable;
-                                self.currentAttributeValue.shrink(0);
+                                self.currentToken.startNewAttribute(self) catch unreachable;
+                                self.currentToken.currentAttributeName.append(next_char) catch unreachable;
                                 self.state = .AttributeName;
                                 return ParseError.UnexpectedEqualsSignBeforeAttributeName;
                             },
                             else => {
-                                self.currentAttributeName.shrink(0);
-                                self.currentAttributeValue.shrink(0);
+                                self.currentToken.startNewAttribute(self) catch unreachable;
                                 self.state = .AttributeName;
                                 self.reconsume = true;
+                                // startNewAttribute can emit an error
+                                if (self.hasQueuedErrorOrToken())
+                                    return self.popQueuedErrorOrToken();
                             }
                         }
                     } else {
@@ -849,15 +999,15 @@ pub const Tokenizer = struct {
                                 self.state = .BeforeAttributeValue;
                             },
                             0x00 => {
-                                self.currentAttributeName.appendSlice("�") catch unreachable;
+                                self.currentToken.currentAttributeName.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             '"', '\'', '<' => {
-                                self.currentAttributeName.append(next_char) catch unreachable;
+                                self.currentToken.currentAttributeName.append(next_char) catch unreachable;
                                 return ParseError.UnexpectedCharacterInAttributeName;
                             },
                             else => {
-                                self.currentAttributeName.append(std.ascii.toLower(next_char)) catch unreachable;
+                                self.currentToken.currentAttributeName.append(std.ascii.toLower(next_char)) catch unreachable;
                             }
                         }
                     } else {
@@ -879,15 +1029,12 @@ pub const Tokenizer = struct {
                                 self.state = .BeforeAttributeValue;
                             },
                             '>' => {
-                                self.addAttributeToCurrentToken();
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             else => {
-                                self.currentAttributeName.shrink(0);
-                                self.currentAttributeValue.shrink(0);
+                                self.currentToken.startNewAttribute(self) catch unreachable;
                                 self.state = .AttributeName;
                                 self.reconsume = true;
                             }
@@ -914,10 +1061,8 @@ pub const Tokenizer = struct {
                                 continue;
                             },
                             '>' => {
-                                self.addAttributeToCurrentToken();
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.MissingAttributeValue;
                             },
                             else => {}, // fallthrough
@@ -939,11 +1084,11 @@ pub const Tokenizer = struct {
                                 self.state = .CharacterReference;
                             },
                             0x00 => {
-                                self.currentAttributeValue.appendSlice("�") catch unreachable;
+                                self.currentToken.currentAttributeValue.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             else => {
-                                self.currentAttributeValue.append(next_char) catch unreachable;
+                                self.currentToken.currentAttributeValue.append(next_char) catch unreachable;
                             }
                         }
                     } else {
@@ -963,11 +1108,11 @@ pub const Tokenizer = struct {
                                 self.state = .CharacterReference;
                             },
                             0x00 => {
-                                self.currentAttributeValue.appendSlice("�") catch unreachable;
+                                self.currentToken.currentAttributeValue.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             else => {
-                                self.currentAttributeValue.append(next_char) catch unreachable;
+                                self.currentToken.currentAttributeValue.append(next_char) catch unreachable;
                             }
                         }
                     } else {
@@ -987,18 +1132,20 @@ pub const Tokenizer = struct {
                                 self.state = .CharacterReference;
                             },
                             '>' => {
-                                self.addAttributeToCurrentToken();
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
+                            0x00 => {
+                                self.currentToken.currentAttributeValue.appendSlice("�") catch unreachable;
+                                return ParseError.UnexpectedNullCharacter;
+                            },
                             '"', '\'', '<', '=', '`' => {
-                                self.currentAttributeValue.append(next_char) catch unreachable;
+                                self.currentToken.currentAttributeValue.append(next_char) catch unreachable;
                                 return ParseError.UnexpectedCharacterInUnquotedAttributeValue;
                             },
                             else => {
-                                self.currentAttributeValue.append(next_char) catch unreachable;
+                                self.currentToken.currentAttributeValue.append(next_char) catch unreachable;
                             }
                         }
                     } else {
@@ -1009,7 +1156,6 @@ pub const Tokenizer = struct {
                 // 12.2.5.39 After attribute value (quoted) state
                 .AfterAttributeValueQuoted => {
                     if (self.nextChar()) |next_char| {
-                        self.addAttributeToCurrentToken();
                         switch (next_char) {
                             '\t', 0x0A, 0x0C, ' ' => {
                                 self.state = .BeforeAttributeName;
@@ -1019,13 +1165,13 @@ pub const Tokenizer = struct {
                             },
                             '>' => {
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             else => {
                                 self.state = .BeforeAttributeName;
                                 self.reconsume = true;
+                                return ParseError.MissingWhitespaceBetweenAttributes;
                             }
                         }
                     } else {
@@ -1036,23 +1182,11 @@ pub const Tokenizer = struct {
                 // 12.2.5.40 Self-closing start tag state
                 .SelfClosingStartTag => {
                     if (self.nextChar()) |next_char| {
-                        self.addAttributeToCurrentToken();
                         switch (next_char) {
                             '>' => {
-                                switch (self.currentToken.?) {
-                                    .StartTag => |*tag| {
-                                        tag.selfClosing = true;
-                                        tag.name = self.tokenData.toOwnedSlice();
-                                    },
-                                    .EndTag => |*tag| {
-                                        tag.selfClosing = true;
-                                        tag.name = self.tokenData.toOwnedSlice();
-                                    },
-                                    else => {}
-                                }
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.currentToken.selfClosing = true;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             else => {
@@ -1072,19 +1206,19 @@ pub const Tokenizer = struct {
                         switch (next_char) {
                             '>' => {
                                 self.state = .Data;
-                                self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             0x00 => {
-                                self.commentData.appendSlice("�") catch unreachable;
+                                self.currentToken.commentData.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             else => {
-                                self.commentData.append(next_char) catch unreachable;
+                                self.currentToken.commentData.append(next_char) catch unreachable;
                             }
                         }
                     } else {
-                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return self.popQueuedErrorOrToken();
                     }
@@ -1096,6 +1230,7 @@ pub const Tokenizer = struct {
                     if (next_seven.len >= 2 and mem.eql(u8, next_seven[0..2], "--")) {
                         self.index += 2;
                         self.column += 2;
+                        self.currentToken.create(.Comment);
                         self.state = .CommentStart;
                     } else if (std.ascii.eqlIgnoreCase(next_seven, "DOCTYPE")) {
                         self.index += 7;
@@ -1106,12 +1241,13 @@ pub const Tokenizer = struct {
                         // an element in the HTML namespace, then switch to the CDATA section state.
                         self.index += 7;
                         self.column += 7;
-                        self.emitToken(Token { .Comment = .{ .data = "[CDATA[" } });
+                        self.currentToken.create(.Comment);
+                        self.currentToken.commentData.appendSlice("[CDATA[") catch unreachable;
                         self.state = .BogusComment;
                         return ParseError.CDATAInHtmlContent;
                     } else {
                         self.state = .BogusComment;
-                        // FIXME: Create a comment token whose data is the empty string.
+                        self.currentToken.create(.Comment);
                         return ParseError.IncorrectlyOpenedComment;
                     }
                 },
@@ -1125,7 +1261,7 @@ pub const Tokenizer = struct {
                             },
                             '>' => {
                                 self.state = .Data;  
-                                self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.AbruptClosingOfEmptyComment;
                             },
                             else => {}, // fallthrough
@@ -1144,17 +1280,17 @@ pub const Tokenizer = struct {
                             },
                             '>' => {
                                 self.state = .Data;  
-                                self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.AbruptClosingOfEmptyComment;
                             },
                             else => {
-                                self.commentData.append('-') catch unreachable;
+                                self.currentToken.commentData.append('-') catch unreachable;
                                 self.reconsume = true;
                                 self.state = .Comment;
                             }
                         }
                     } else {
-                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInComment;
                     }
@@ -1164,22 +1300,22 @@ pub const Tokenizer = struct {
                     if (self.nextChar()) |next_char| {
                         switch (next_char) {
                             '<' => {
-                                self.commentData.append(next_char) catch unreachable;
+                                self.currentToken.commentData.append(next_char) catch unreachable;
                                 self.state = .CommentLessThanSign;
                             },
                             '-' => {
                                 self.state = .CommentEndDash;  
                             },
                             0x00 => {
-                                self.commentData.appendSlice("�") catch unreachable;
+                                self.currentToken.commentData.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             else => {
-                                self.commentData.append(next_char) catch unreachable;
+                                self.currentToken.commentData.append(next_char) catch unreachable;
                             }
                         }
                     } else {
-                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInComment;
                     }
@@ -1189,12 +1325,12 @@ pub const Tokenizer = struct {
                     if (self.nextChar()) |next_char| {
                         switch (next_char) {
                             '!' => {
-                                self.commentData.append('!') catch unreachable;
+                                self.currentToken.commentData.append('!') catch unreachable;
                                 self.state = .CommentLessThanSignBang;
                                 continue;
                             },
                             '<' => {
-                                self.commentData.append(next_char) catch unreachable;
+                                self.currentToken.commentData.append(next_char) catch unreachable;
                                 continue;
                             },
                             else => {}, // fallthrough
@@ -1242,11 +1378,11 @@ pub const Tokenizer = struct {
                     if (next_char != null and next_char.? == '-') {
                         self.state = .CommentEnd;
                     } else if (next_char == null) {
-                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInComment;
                     } else {
-                        self.commentData.append('-') catch unreachable;
+                        self.currentToken.commentData.append('-') catch unreachable;
                         self.reconsume = true;
                         self.state = .Comment;
                     }
@@ -1257,23 +1393,23 @@ pub const Tokenizer = struct {
                         switch (next_char) {
                             '>' => {
                                 self.state = .Data;
-                                self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             '!' => {
                                 self.state = .CommentEndBang;
                             },
                             '-' => {
-                                self.commentData.append(next_char) catch unreachable;
+                                self.currentToken.commentData.append(next_char) catch unreachable;
                             },
                             else => {
-                                self.commentData.appendSlice("--") catch unreachable;
+                                self.currentToken.commentData.appendSlice("--") catch unreachable;
                                 self.reconsume = true;
                                 self.state = .Comment;
                             }
                         }
                     } else {
-                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInComment;
                     }
@@ -1283,22 +1419,22 @@ pub const Tokenizer = struct {
                     if (self.nextChar()) |next_char| {
                         switch (next_char) {
                             '-' => {
-                                self.commentData.appendSlice("--!") catch unreachable;
+                                self.currentToken.commentData.appendSlice("--!") catch unreachable;
                                 self.state = .CommentEndDash;
                             },
                             '>' => {
                                 self.state = .Data;
-                                self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.IncorrectlyClosedComment;
                             },
                             else => {
-                                self.commentData.appendSlice("--!") catch unreachable;
+                                self.currentToken.commentData.appendSlice("--!") catch unreachable;
                                 self.reconsume = true;
                                 self.state = .Comment;
                             }
                         }
                     } else {
-                        self.emitToken(Token { .Comment = .{ .data = self.commentData.toOwnedSlice() } });
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInComment;
                     }
@@ -1334,20 +1470,19 @@ pub const Tokenizer = struct {
                                 // Ignore and do nothing.
                             },
                             0x00 => {
-                                self.currentToken = Token { .DOCTYPE = .{ .name = "�" } };
+                                self.currentToken.create(.DOCTYPE);
+                                self.currentToken.tokenData.appendSlice("�") catch unreachable;
                                 self.state = .DOCTYPEName;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             '>' => {
-                                self.currentToken = Token { .DOCTYPE = .{ .forceQuirks = true } };
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(Token { .DOCTYPE = .{ .forceQuirks = true } });
                                 return ParseError.MissingDoctypeName;
                             },
                             else => {
-                                self.currentToken = Token { .DOCTYPE = .{ } };
-                                self.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
+                                self.currentToken.create(.DOCTYPE);
+                                self.currentToken.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
                                 self.state = .DOCTYPEName;
                             }
                         }
@@ -1365,28 +1500,21 @@ pub const Tokenizer = struct {
                                 self.state = .AfterDOCTYPEName;
                             },
                             '>' => {
-                                var name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.name = name;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             0x00 => {
-                                self.currentToken = Token { .DOCTYPE = .{ } };
-                                self.tokenData.appendSlice("�") catch unreachable;
+                                self.currentToken.tokenData.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             else => {
-                                // TODO: This is wrong, 'anything else' shouldn't do this
-                                // also applies to other DOCTYPE states probably
-                                self.currentToken = Token { .DOCTYPE = .{ } };
-                                self.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
+                                self.currentToken.tokenData.append(std.ascii.toLower(next_char)) catch unreachable;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1404,8 +1532,7 @@ pub const Tokenizer = struct {
                                 self.index += 1; // consume
                                 self.column += 1;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             else => {
@@ -1420,10 +1547,7 @@ pub const Tokenizer = struct {
                                     self.state = .AfterDOCTYPESystemKeyword;
                                 } else {
                                     // reconsume, but since we peek'd to begin with, no need to actually set reconsume here
-                                    self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                    self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                    self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                    self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                    self.currentToken.forceQuirks = true;
                                     self.state = .BogusDOCTYPE;
                                     return ParseError.InvalidCharacterSequenceAfterDoctypeName;
                                 }
@@ -1432,8 +1556,8 @@ pub const Tokenizer = struct {
                     } else {
                         self.index += 1; // consume
                         self.column += 1;
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1446,38 +1570,33 @@ pub const Tokenizer = struct {
                                 self.state = .BeforeDOCTYPEPublicIdentifier;
                             },
                             '"' => {
-                                self.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifierMissing = false;
                                 self.state = .DOCTYPEPublicIdentifierDoubleQuoted;
                                 return ParseError.MissingWhitespaceAfterDoctypePublicKeyword;
                             },
                             '\'' => {
-                                self.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifierMissing = false;
                                 self.state = .DOCTYPEPublicIdentifierSingleQuoted;
                                 return ParseError.MissingWhitespaceAfterDoctypePublicKeyword;
                             },
                             '>' => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.MissingDoctypePublicIdentifier;
                             },
                             else => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.reconsume = true;
                                 self.state = .BogusDOCTYPE;
                                 return ParseError.MissingQuoteBeforeDoctypePublicIdentifier;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1490,36 +1609,31 @@ pub const Tokenizer = struct {
                                 // Ignore and do nothing
                             },
                             '"' => {
-                                self.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifierMissing = false;
                                 self.state = .DOCTYPEPublicIdentifierDoubleQuoted;
                             },
                             '\'' => {
-                                self.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifier.shrink(0);
+                                self.currentToken.publicIdentifierMissing = false;
                                 self.state = .DOCTYPEPublicIdentifierSingleQuoted;
                             },
                             '>' => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
-                                return self.popQueuedErrorOrToken();
+                                self.emitToken(self.currentToken.complete(self));
+                                return ParseError.MissingDoctypePublicIdentifier;
                             },
                             else => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.reconsume = true;
                                 self.state = .BogusDOCTYPE;
                                 return ParseError.MissingQuoteBeforeDoctypePublicIdentifier;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1532,26 +1646,22 @@ pub const Tokenizer = struct {
                                 self.state = .AfterDOCTYPEPublicIdentifier;
                             },
                             0x00 => {
-                                self.publicIdentifier.appendSlice("�") catch unreachable;
+                                self.currentToken.publicIdentifier.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             '>' => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.AbruptDoctypePublicIdentifier;
                             },
                             else => {
-                                self.publicIdentifier.append(next_char) catch unreachable;
+                                self.currentToken.publicIdentifier.append(next_char) catch unreachable;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1564,26 +1674,22 @@ pub const Tokenizer = struct {
                                 self.state = .AfterDOCTYPEPublicIdentifier;
                             },
                             0x00 => {
-                                self.publicIdentifier.appendSlice("�") catch unreachable;
+                                self.currentToken.publicIdentifier.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             '>' => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.AbruptDoctypePublicIdentifier;
                             },
                             else => {
-                                self.publicIdentifier.append(next_char) catch unreachable;
+                                self.currentToken.publicIdentifier.append(next_char) catch unreachable;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1597,34 +1703,31 @@ pub const Tokenizer = struct {
                             },
                             '>' => {
                                 self.state = .Data;
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             '"' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierDoubleQuoted;
                                 return ParseError.MissingWhitespaceBetweenDoctypePublicAndSystemIdentifiers;
                             },
                             '\'' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierSingleQuoted;
                                 return ParseError.MissingWhitespaceBetweenDoctypePublicAndSystemIdentifiers;
                             },
                             else => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.reconsume = true;
                                 self.state = .BogusDOCTYPE;
                                 return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1638,31 +1741,29 @@ pub const Tokenizer = struct {
                             },
                             '>' => {
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             '"' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierDoubleQuoted;
                             },
                             '\'' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierSingleQuoted;
                             },
                             else => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.reconsume = true;
                                 self.state = .BogusDOCTYPE;
                                 return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1675,34 +1776,33 @@ pub const Tokenizer = struct {
                                 self.state = .BeforeDOCTYPESystemIdentifier;
                             },
                             '"' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierDoubleQuoted;
                                 return ParseError.MissingWhitespaceAfterDoctypeSystemKeyword;
                             },
                             '\'' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierSingleQuoted;
                                 return ParseError.MissingWhitespaceAfterDoctypeSystemKeyword;
                             },
                             '>' => {
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.MissingDoctypeSystemIdentifier;
                             },
                             else => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.reconsume = true;
                                 self.state = .BogusDOCTYPE;
                                 return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1715,36 +1815,31 @@ pub const Tokenizer = struct {
                                 // Ignore and do nothing
                             },
                             '"' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierDoubleQuoted;
                             },
                             '\'' => {
-                                self.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifier.shrink(0);
+                                self.currentToken.systemIdentifierMissing = false;
                                 self.state = .DOCTYPESystemIdentifierSingleQuoted;
                             },
                             '>' => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             else => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.reconsume = true;
                                 self.state = .BogusDOCTYPE;
                                 return ParseError.MissingQuoteBeforeDoctypeSystemIdentifier;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1757,26 +1852,22 @@ pub const Tokenizer = struct {
                                 self.state = .AfterDOCTYPESystemIdentifier;
                             },
                             0x00 => {
-                                self.systemIdentifier.appendSlice("�") catch unreachable;
+                                self.currentToken.systemIdentifier.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             '>' => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.publicIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.AbruptDoctypeSystemIdentifier;
                             },
                             else => {
-                                self.systemIdentifier.append(next_char) catch unreachable;
+                                self.currentToken.systemIdentifier.append(next_char) catch unreachable;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1789,26 +1880,22 @@ pub const Tokenizer = struct {
                                 self.state = .AfterDOCTYPESystemIdentifier;
                             },
                             0x00 => {
-                                self.systemIdentifier.appendSlice("�") catch unreachable;
+                                self.currentToken.systemIdentifier.appendSlice("�") catch unreachable;
                                 return ParseError.UnexpectedNullCharacter;
                             },
                             '>' => {
-                                self.currentToken.?.DOCTYPE.forceQuirks = true;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
+                                self.currentToken.forceQuirks = true;
                                 self.state = .Data;
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return ParseError.AbruptDoctypeSystemIdentifier;
                             },
                             else => {
-                                self.systemIdentifier.append(next_char) catch unreachable;
+                                self.currentToken.systemIdentifier.append(next_char) catch unreachable;
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1822,11 +1909,7 @@ pub const Tokenizer = struct {
                             },
                             '>' => {
                                 self.state = .Data;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             else => {
@@ -1836,8 +1919,8 @@ pub const Tokenizer = struct {
                             }
                         }
                     } else {
-                        self.currentToken.?.DOCTYPE.forceQuirks = true;
-                        self.emitToken(self.currentToken.?);
+                        self.currentToken.forceQuirks = true;
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return ParseError.EofInDOCTYPE;
                     }
@@ -1848,11 +1931,7 @@ pub const Tokenizer = struct {
                         switch (next_char) {
                             '>' => {
                                 self.state = .Data;
-                                self.currentToken.?.DOCTYPE.name = self.tokenData.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.publicIdentifier = self.publicIdentifier.toOwnedSlice();
-                                self.currentToken.?.DOCTYPE.systemIdentifier = self.systemIdentifier.toOwnedSlice();
-                                self.emitToken(self.currentToken.?);
-                                self.currentToken = null;
+                                self.emitToken(self.currentToken.complete(self));
                                 return self.popQueuedErrorOrToken();
                             },
                             0x00 => {
@@ -1863,7 +1942,7 @@ pub const Tokenizer = struct {
                             }
                         }
                     } else {
-                        self.emitToken(self.currentToken.?);
+                        self.emitToken(self.currentToken.complete(self));
                         self.emitToken(Token.EndOfFile);
                         return self.popQueuedErrorOrToken();
                     }
@@ -1981,7 +2060,7 @@ pub const Tokenizer = struct {
                     var next_char = self.nextChar();
                     if (next_char != null and std.ascii.isAlNum(next_char.?)) {
                         if (self.inAttributeState()) {
-                            self.currentAttributeValue.append(next_char.?) catch unreachable;
+                            self.currentToken.currentAttributeValue.append(next_char.?) catch unreachable;
                         } else {
                             self.emitToken(Token { .Character = .{ .data = next_char.? } });
                             return self.popQueuedErrorOrToken();
@@ -2118,6 +2197,9 @@ pub const Tokenizer = struct {
 
     /// Returns true if that last char consumed is EOF
     pub fn eof(self: Self) bool {
+        if (self.contents.len == 0) {
+            return true;
+        }
         return self.index > self.contents.len;
     }
 
@@ -2140,13 +2222,22 @@ pub const Tokenizer = struct {
     pub fn emitToken(self: *Self, token: Token) void {
         if (token == .EndTag) {
             if (token.EndTag.attributes.items().len > 0) {
-                self.errorQueue.writeItem(@errorToInt(ParseError.EndTagWithAttributes)) catch unreachable;
+                self.emitError(ParseError.EndTagWithAttributes);
             }
             if (token.EndTag.selfClosing) {
-                self.errorQueue.writeItem(@errorToInt(ParseError.EndTagWithTrailingSolidus)) catch unreachable;
+                self.emitError(ParseError.EndTagWithTrailingSolidus);
             }
         }
+        if (token == .StartTag) {
+            // FIXME: lastEmittedStartTag does not own its own 'name' memory. It should
+            //        probably copy the 'name' memory instead of re-using the emitted token's memory.
+            self.lastEmittedStartTag = token;
+        }
         self.backlog.writeItem(token) catch unreachable;
+    }
+
+    pub fn emitError(self: *Self, err: ParseError) void {
+        self.errorQueue.writeItem(@errorToInt(err)) catch unreachable;
     }
 
     fn inAttributeState(self: Self) bool {
@@ -2161,7 +2252,9 @@ pub const Tokenizer = struct {
     fn flushTemporaryBufferAsCharacterReference(self: *Self) void {
         const characterReference = self.temporaryBuffer.toOwnedSlice();
         if (self.inAttributeState()) {
-            self.currentAttributeValue.appendSlice(characterReference) catch unreachable;
+            // FIXME: This is a hack because we don't append & to the temporary buffer
+            self.currentToken.currentAttributeValue.append('&') catch unreachable;
+            self.currentToken.currentAttributeValue.appendSlice(characterReference) catch unreachable;
         } else {
             var i: usize = characterReference.len - 1;
             while (i >= 0) {
@@ -2177,27 +2270,10 @@ pub const Tokenizer = struct {
             var char: [4]u8 = undefined;
             var len = std.unicode.utf8Encode(codepoint, char[0..]) catch unreachable;
             self.temporaryBuffer.appendSlice(char[0..len]) catch unreachable;
-            self.currentAttributeValue.appendSlice(self.temporaryBuffer.toOwnedSlice()) catch unreachable;
+            self.currentToken.currentAttributeValue.appendSlice(self.temporaryBuffer.toOwnedSlice()) catch unreachable;
         } else {
             self.temporaryBuffer.shrink(0);
             self.emitToken(Token { .Character = .{ .data = codepoint } });
-        }
-    }
-
-    fn addAttributeToCurrentToken(self: *Self) void {
-        if (self.currentAttributeName.items.len < 1) return;
-        var name = self.currentAttributeName.toOwnedSlice();
-        var value = self.currentAttributeValue.toOwnedSlice();
-        switch (self.currentToken.?) {
-            .StartTag => |*tag| {
-                _ = tag.attributes.put(name, value) catch unreachable;
-                tag.name = self.tokenData.toOwnedSlice();
-            },
-            .EndTag => |*tag| {
-                _= tag.attributes.put(name, value) catch unreachable;
-                tag.name = self.tokenData.toOwnedSlice();
-            },
-            else => {}
         }
     }
 
@@ -2226,10 +2302,10 @@ pub const Tokenizer = struct {
     }
 
     fn currentChar(self: *Self) ?u8 {
-        if (self.index == 0) {
-            return self.contents[self.index];
-        } else if (self.eof()) {
+        if (self.eof()) {
             return null;
+        } else if (self.index == 0) {
+            return self.contents[self.index];
         } else {
             return self.contents[self.index - 1];
         }
@@ -2260,6 +2336,145 @@ pub const Tokenizer = struct {
 
     fn getIndex(self: *Self) usize {
         return self.index;
+    }
+};
+
+/// A token that is still being constructed and has yet to be emitted.
+/// Contains temporary buffers necessary for the construction of a token during tokenization.
+pub const IncompleteToken = struct {
+    const Self = @This();
+
+    tokenType: ?@TagType(Token) = null,
+    forceQuirks: bool = false,
+    selfClosing: bool = false,
+    tokenData: ArrayList(u8),
+    publicIdentifier: ArrayList(u8),
+    publicIdentifierMissing: bool = true,
+    systemIdentifier: ArrayList(u8),
+    systemIdentifierMissing: bool = true,
+    commentData: ArrayList(u8),
+    currentAttributeName: ArrayList(u8),
+    currentAttributeValue: ArrayList(u8),
+    attributes: StringHashMap([]const u8),
+    allocator: *mem.Allocator,
+
+    // TODO: Might be nice to take a *Tokenizer instead, but that would require 
+    //       https://github.com/ziglang/zig/issues/2765 because the Tokenizer.init fn's
+    //       would need to be able to get a pointer to the struct value that will 
+    //       be returned. This would allow us to remove the *Tokenizer parameters from
+    //       the IncompleteToken functions that currently take one.
+    pub fn init(allocator: *mem.Allocator) Self {
+        return Self {
+            .allocator = allocator,
+            .tokenData = ArrayList(u8).init(allocator),
+            .publicIdentifier = ArrayList(u8).init(allocator),
+            .systemIdentifier = ArrayList(u8).init(allocator),
+            .commentData = ArrayList(u8).init(allocator),
+            .currentAttributeName = ArrayList(u8).init(allocator),
+            .currentAttributeValue = ArrayList(u8).init(allocator),
+            .attributes = StringHashMap([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        // TODO: Handle deinit of ArrayList's, currently we can't deinit them
+        //       because we use toOwnedSlice
+        self.attributes.deinit();
+    }
+
+    pub fn create(self: *Self, tokenType: @TagType(Token)) void {
+        std.debug.assert(self.tokenType == null);
+        self.reset();
+        self.tokenType = tokenType;
+    }
+
+    pub fn startNewAttribute(self: *Self, tokenizer: *Tokenizer) !void {
+        try self.flushAttribute(tokenizer);
+        self.currentAttributeName.shrink(0);
+        self.currentAttributeValue.shrink(0);
+    }
+
+    fn flushAttribute(self: *Self, tokenizer: *Tokenizer) !void {
+        if (self.currentAttributeName.items.len == 0)
+            return;
+        const isDuplicate = self.attributes.get(self.currentAttributeName.items) != null;
+        if (isDuplicate) {
+            tokenizer.emitError(ParseError.DuplicateAttribute);
+        } else {
+            try self.attributes.putNoClobber(self.currentAttributeName.toOwnedSlice(), self.currentAttributeValue.toOwnedSlice());
+        }
+    }
+
+    pub fn isAppropriateEndTag(self: *Self, tokenizer: *Tokenizer) bool {
+        std.debug.assert(self.tokenType.? == .EndTag);
+        if (tokenizer.lastEmittedStartTag) |last| {
+            return mem.eql(u8, self.tokenData.items, last.EndTag.name.?);
+        } else {
+            return false;
+        }
+    }
+
+    /// Return a finished Token and reset state
+    pub fn complete(self: *Self, tokenizer: *Tokenizer) Token {
+        var token: Token = undefined;
+        switch(self.tokenType.?) {
+            .DOCTYPE => {
+                token = Token{
+                    .DOCTYPE = .{
+                        .name = self.tokenData.toOwnedSlice(),
+                        .publicIdentifier = if (!self.publicIdentifierMissing) self.publicIdentifier.toOwnedSlice() else null,
+                        .systemIdentifier = if (!self.systemIdentifierMissing) self.systemIdentifier.toOwnedSlice() else null,
+                        .forceQuirks = self.forceQuirks,
+                    }
+                };
+            },
+            .StartTag => {
+                self.flushAttribute(tokenizer) catch unreachable;
+                token = Token{
+                    .StartTag = .{
+                        .name = self.tokenData.toOwnedSlice(),
+                        .selfClosing = self.selfClosing,
+                        .attributes = self.attributes.clone() catch unreachable,
+                    }
+                };
+            },
+            .EndTag => {
+                self.flushAttribute(tokenizer) catch unreachable;
+                token = Token{
+                    .EndTag = .{
+                        .name = self.tokenData.toOwnedSlice(),
+                        .selfClosing = self.selfClosing,
+                        .attributes = self.attributes.clone() catch unreachable,
+                    }
+                };
+            },
+            .Comment => {
+                token = Token{
+                    .Comment = .{
+                        .data = self.commentData.toOwnedSlice(),
+                    }
+                };
+            },
+            .Character => unreachable,
+            .EndOfFile => unreachable,
+        }
+        self.reset();
+        return token;
+    }
+
+    fn reset(self: *Self) void {
+        self.tokenType = null;
+        self.forceQuirks = false;
+        self.selfClosing = false;
+        self.tokenData.shrink(0);
+        self.publicIdentifier.shrink(0);
+        self.publicIdentifierMissing = true;
+        self.systemIdentifier.shrink(0);
+        self.systemIdentifierMissing = true;
+        self.commentData.shrink(0);
+        self.currentAttributeName.shrink(0);
+        self.currentAttributeValue.shrink(0);
+        self.attributes.clearAndFree();
     }
 };
 
