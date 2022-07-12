@@ -21,7 +21,7 @@ pub fn main() void {
     var tokenizer = try Tokenizer.initWithFile(alloc, "./test.html");
     while (true) {
         var token = self.tokenizer.nextToken() catch |err| {
-            std.debug.warn("{} (line: {}, column: {})\n, .{ err, tokenizer.line, tokenizer.column });
+            std.debug.warn("{} (line: {}, column: {})\n", .{ err, tokenizer.line, tokenizer.column });
             continue;
         };
 
