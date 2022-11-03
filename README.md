@@ -8,6 +8,8 @@ This is a work in progress, spec compliant, HTML parser built with [Zig](https:/
 - [ ] Parser (in progress)
 - [ ] JavaScript DOM API support
 
+See the [CHANGELOG.md](changelog) for detailed information on past changes.
+
 ## Tokenizer
 
 The `Tokenizer` struct provides a (mostly) fully featured HTML tokenizer built according to the [WHATGW HTML Spec](https://html.spec.whatwg.org/multipage/parsing.html#tokenization). It is a streaming tokenizer which takes as input a full document, processes the document character by character, and emits both `Token`s and `ParseError`s. An example usage of it by itself could look like this:

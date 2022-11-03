@@ -1,0 +1,20 @@
+pkgs:
+  zhtml:
+    version: 0.2.0
+    root: src/main.zig
+    description: A work in progress, spec compliant, HTML parser built with Zig
+    license: MIT
+    homepage_url: https://github.com/watzon/zhtml
+    source_url: https://github.com/watzon/zhtml
+
+    tags:
+      - html
+      - parser
+      - whatwg
+      - w3
+    
+    files:
+      - LICENSE
+      - README.md
+      - build.zig
+      - src/*.zig

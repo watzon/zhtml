@@ -16,17 +16,20 @@ pub const Token = union(enum) {
         selfClosing: bool = false,
         attributes: StringHashMap([]const u8),
 
-        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
+        pub fn format(value: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             try writer.writeAll("{ ");
-            try writer.print(".name = {}, .selfClosing = {}", .{ value.name, value.selfClosing });
-            if (value.attributes.items().len > 0) {
+            try writer.print(".name = {any}, .selfClosing = {any}", .{ value.name, value.selfClosing });
+            var it = value.attributes.iterator();
+            if (value.attributes.count() > 0) {
                 try writer.writeAll(", attributes = .{ ");
-                for (value.attributes.items()) |entry, i| {
-                    try writer.print("{}: \"{}\"", .{ entry.key, entry.value });
-                    if (i + 1 < value.attributes.items().len)
+                var i: u32 = 0;
+                while (it.next()) |entry| {
+                    try writer.print("{s}: \"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* });
+                    if (i + 1 < value.attributes.count())
                         try writer.writeAll(", ");
                 }
                 try writer.writeAll(" }");
+                i += 1;
             }
             try writer.writeAll(" }");
         }
@@ -38,9 +41,9 @@ pub const Token = union(enum) {
         /// Ignored past tokenization, only used for errors
         attributes: StringHashMap([]const u8),
 
-        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
+        pub fn format(value: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             try writer.writeAll("{ ");
-            try writer.print(".name = {}, .selfClosing = {}", .{ value.name, value.selfClosing });
+            try writer.print(".name = {any}, .selfClosing = {any}", .{ value.name, value.selfClosing });
             try writer.writeAll(" }");
         }
     },
@@ -50,14 +53,14 @@ pub const Token = union(enum) {
     Character: struct {
         data: u21,
 
-        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
+        pub fn format(value: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             var char: [4]u8 = undefined;
             var len = std.unicode.utf8Encode(value.data, char[0..]) catch unreachable;
             if (char[0] == '\n') {
                 len = 2;
                 std.mem.copy(u8, char[0..2], "\\n");
             }
-            try writer.print("\"{}\"", .{ char[0..len] });
+            try writer.print("\"{s}\"", .{ char[0..len] });
         }
     },
     EndOfFile,
