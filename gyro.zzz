@@ -1,7 +1,7 @@
 pkgs:
   zhtml:
     version: 0.2.0
-    root: src/main.zig
+    root: src/lib.zig
     description: A work in progress, spec compliant, HTML parser built with Zig
     license: MIT
     homepage_url: https://github.com/watzon/zhtml
